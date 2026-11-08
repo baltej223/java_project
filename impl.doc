@@ -1,0 +1,1673 @@
+# Java Crobat — Implementation Document
+
+> Plain-Markdown implementation plan. The file is named `impl.doc` because that is
+> what the project brief asks for; it is not a Word binary. Read it with any text
+> editor, or rename it to `impl.md` if your tooling prefers that.
+
+**Status:** v1 implemented and verified. See §21 for the decisions made while coding.
+
+---
+
+## 1. What we are building
+
+A Java rewrite of the Go project in `crobat/`.
+
+Crobat is **cron as a service**. A tenant creates a task that calls an HTTP
+endpoint:
+
+- **now**,
+- **once at a date/time**, or
+- **on a cron expression** in any IANA timezone.
+
+Each task has a priority, a timeout, and a retry policy. Every execution is a
+**job**. Jobs are claimed by executors, called over HTTP, retried with
+exponential backoff, and moved to a dead letter queue (DLQ) when their attempts
+are exhausted. Finished jobs are moved to history.
+
+The defining design choice is kept: **there is no message broker. The `jobs`
+table in MySQL is the queue.** A job is saved before it can run, so the database
+and a queue can never disagree.
+
+### 1.1 What "the same" means
+
+The Java version must have the same **observable behavior**:
+
+| Area | Required behavior |
+|---|---|
+| Scheduling | now / at / cron, timezone-aware |
+| Priorities | critical, high, normal, low |
+| Queue | MySQL table claimed with `FOR UPDATE SKIP LOCKED` |
+| Leases | stored in the job row |
+| Fencing | `attempt` counter guards every result write |
+| Retries | exponential backoff, capped at 1 hour |
+| DLQ | dead jobs listed and manually retried |
+| History | finished jobs queryable; hot rows removed after a retention window |
+| Delivery | at-least-once; stable `Idempotency-Key` per job |
+| Multi-tenancy | tenant from JWT `sub`, never from the request body |
+| Secrets | request headers/body encrypted with AES-256-GCM, never returned/logged/archived |
+| Edit safety | a job copies its task's request at plan time |
+| Idempotent create | `(tenant_id, Idempotency-Key)` unique |
+| SSRF | only public IPs, only ports 80/443, no proxy, no redirects |
+
+### 1.2 Deliberate simplifications for a Java course project
+
+These are the only intended differences from the Go design. They reduce the
+number of moving parts without changing the user-facing behavior.
+
+1. **One MySQL database, not MySQL + Cassandra.**
+   History lives in a `job_history` table. The archiver still writes history
+   first and deletes the hot row second. A scheduled cleanup deletes history
+   older than 30 days. This removes the Cassandra driver, keyspace setup, and a
+   second database from the student demo.
+2. **One JVM, several roles.**
+   The Go project already ships six services in one binary. The Java version
+   runs all roles in one process by default (`all`), and can also run one role
+   per process. No service discovery, no RPC.
+3. **No connection pool library.**
+   Each database operation opens a JDBC connection with `DriverManager` and
+   closes it with try-with-resources. This is enough for a course demo and is
+   easy to read. If the demo ever needs more throughput, add HikariCP later
+   without changing the SQL or service code. Do not hand-write a pool.
+4. **SSRF check before the call, not inside the socket.**
+   Java's built-in `HttpClient` has no dialer hook equivalent to Go's
+   `net.Dialer.Control`. We resolve every address and reject non-public ones
+   immediately before the request. This blocks the normal attack and DNS
+   rebinding is a documented residual risk. See §10.
+5. **Text logs, not JSON logs.**
+   `java.util.logging` with one line per important event. No log framework.
+
+Everything else in the Go design is preserved.
+
+---
+
+## 2. Technology choices
+
+| Need | Choice | Reason |
+|---|---|---|
+| Language | **Java 17** | Widely available, LTS, enough for `HttpClient` and `java.time` |
+| Build | **Maven** | One `pom.xml`, one command, standard in courses |
+| HTTP server | **`com.sun.net.httpserver.HttpServer`** | In the JDK; no Spring |
+| JSON | **Jackson** (`jackson-databind`, `jackson-datatype-jsr310`) | Explicit DTOs, easy date handling |
+| Database | **MySQL 8.0+**, plain JDBC + `mysql-connector-j` | Same database as the reference |
+| Cron | **`cron-utils`** | Correct next-run calculation with timezones |
+| JWT | Hand-written HS256 utility (JDK `Mac` + Base64) | About 80 lines; avoids a security dependency |
+| Tests | **JUnit 5** | Standard |
+| Logging | `java.util.logging` | No extra dependency |
+| Packaging | Maven Shade plugin → runnable JAR | `java -jar` works |
+| Local stack | Docker Compose: MySQL + app + echo | Reproducible demo |
+
+Suggested `pom.xml` dependencies:
+
+```xml
+<dependency>
+  <groupId>com.fasterxml.jackson.core</groupId>
+  <artifactId>jackson-databind</artifactId>
+  <version>2.17.2</version>
+</dependency>
+<dependency>
+  <groupId>com.fasterxml.jackson.datatype</groupId>
+  <artifactId>jackson-datatype-jsr310</artifactId>
+  <version>2.17.2</version>
+</dependency>
+<dependency>
+  <groupId>com.mysql</groupId>
+  <artifactId>mysql-connector-j</artifactId>
+  <version>8.4.0</version>
+</dependency>
+<dependency>
+  <groupId>com.cronutils</groupId>
+  <artifactId>cron-utils</artifactId>
+  <version>9.2.1</version>
+</dependency>
+<dependency>
+  <groupId>org.junit.jupiter</groupId>
+  <artifactId>junit-jupiter</artifactId>
+  <version>5.10.3</version>
+  <scope>test</scope>
+</dependency>
+```
+
+Compiler settings: `<release>17</release>`. Shade plugin main class:
+`com.example.crobat.Main`.
+
+---
+
+## 3. Runtime modes
+
+`Main` reads `args[0]`:
+
+| Mode | What starts |
+|---|---|
+| `all` (default) | task API + job API + scheduler + executor + reconciler + archiver |
+| `task-api` | HTTP server on port 8080 |
+| `job-api` | HTTP server on port 8081 |
+| `scheduler` | scheduler loop |
+| `executor` | executor loop |
+| `reconciler` | reconciler loop |
+| `archiver` | archiver loop |
+| `echo` | demo target server (default 8083; Compose binds it to 80 inside the container) |
+| `cli ...` | command-line client |
+
+`all` is the mode used by Docker Compose and by the classroom demo. The
+single-role modes exist so the project can still show the same service
+separation as the Go version.
+
+Startup order in `all`:
+
+1. load `Config`;
+2. check required secrets;
+3. open a database connection and ping it;
+4. build stores and services;
+5. start the two HTTP servers;
+6. start the four background loops;
+7. block until SIGINT/SIGTERM;
+8. stop servers and loops.
+
+If MySQL is not reachable, fail fast with a clear message. Do not start
+half-working.
+
+---
+
+## 4. Directory and class map
+
+```
+pom.xml
+Dockerfile
+docker-compose.yml
+deploy/mysql/schema.sql
+src/main/java/com/example/crobat/
+  Main.java
+
+  config/
+    Config.java              environment variables + defaults
+
+  domain/
+    Priority.java            enum CRITICAL, HIGH, NORMAL, LOW
+    TaskStatus.java          enum ACTIVE, PAUSED, DELETED
+    JobStatus.java           enum PENDING, RUNNING, SUCCEEDED, DEAD
+    RequestSpec.java         method, url, headers, body
+    RetryPolicy.java         maxAttempts, backoffMs
+    Task.java                configuration + normalize/firstRun/nextAfter/newJob
+    Job.java                 one execution + apply(result)
+    Result.java              one HTTP attempt's outcome
+    CronSchedule.java        wraps cron-utils
+    Backoff.java             exponential backoff calculation
+    FairPick.java            per-tenant fair selection
+    DomainException.java     validation error -> HTTP 400
+    NotFoundException.java   missing row -> HTTP 404
+
+  db/
+    Database.java            JDBC connection helper
+    SecretsCipher.java       AES-256-GCM encrypt/decrypt
+    TaskStore.java           tasks table + scheduler transaction
+    JobStore.java            jobs table: claim, result, lease, archive, DLQ
+    HistoryStore.java        job_history table
+
+  services/
+    TaskService.java         create/get/list/update/pause/resume/delete
+    JobService.java          status/history/DLQ/manual retry
+    SchedulerLoop.java       due tasks -> pending jobs
+    ExecutorLoop.java        claim -> timer -> HTTP -> save
+    ReconcilerLoop.java      expired leases -> pending/dead
+    ArchiverLoop.java        hot jobs -> history, then delete
+
+  http/
+    Json.java                shared ObjectMapper
+    Jwt.java                 sign/verify HS256
+    Router.java              method + path routing + auth + errors
+    TaskApi.java             task routes
+    JobApi.java              job routes
+    EchoApi.java             /fail, /flaky, /slow, default 200
+
+  call/
+    HttpCaller.java          HttpClient wrapper, headers, timeout
+    SsrfGuard.java           public-IP / port / no-proxy checks
+
+  cli/
+    Cli.java                 token, task, job commands
+```
+
+Dependency direction:
+
+```
+Main -> services -> db, domain, call
+Main -> http    -> services, domain
+db, http, call  -> domain
+domain          -> nothing from the project
+```
+
+`domain` has no JDBC, no HTTP, no config. This keeps the rules testable and
+readable.
+
+---
+
+## 5. Domain model
+
+### 5.1 `Priority`
+
+```java
+public enum Priority {
+    CRITICAL(0), HIGH(1), NORMAL(2), LOW(3);
+
+    private final int value;
+    Priority(int value) { this.value = value; }
+    public int getValue() { return value; }
+
+    public static Priority fromString(String s) {
+        if (s == null || s.isBlank()) return NORMAL;
+        for (Priority p : values()) {
+            if (p.name().equalsIgnoreCase(s)) return p;
+        }
+        throw new DomainException("priority must be critical, high, normal or low");
+    }
+}
+```
+
+Lower value is served first. The database stores `0..3`.
+
+### 5.2 `RequestSpec`
+
+```java
+public class RequestSpec {
+    private String method = "POST";
+    private String url;
+    private Map<String, String> headers = new LinkedHashMap<>();
+    private String body = "";
+}
+```
+
+The getters/setters are normal Java. Jackson annotations:
+
+```java
+@JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
+public Map<String, String> getHeaders() { ... }
+
+@JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
+public String getBody() { ... }
+```
+
+`WRITE_ONLY` means the fields are accepted in a `POST /tasks` body but never
+appear in an API response. This is the Java equivalent of Go's `json:"-"`.
+
+### 5.3 `Task`
+
+Fields:
+
+```text
+id, tenantId, name, cron, timezone, at, priority,
+request, timeoutMs, retry, status, nextRunAt,
+idempotencyKey, version, createdAt, updatedAt
+```
+
+`idempotencyKey` is not serialized to JSON. It comes from the HTTP header.
+
+Methods:
+
+```java
+void normalize()
+Instant firstRun(Instant now)
+Instant nextAfter(Instant prev)     // null for one-shot tasks
+Job newJob(Instant at)
+```
+
+`normalize()` must:
+
+| Rule | Value |
+|---|---|
+| name | trim; required; max 255 |
+| cron vs at | not both |
+| timezone | default `UTC`; must be a valid `ZoneId` |
+| cron | parse with cron-utils; 5-field UNIX format |
+| priority | default `NORMAL`; must be valid |
+| method | uppercase; default `POST`; one of GET/POST/PUT/PATCH/DELETE |
+| url | absolute `http` or `https`; host present; max 2048 |
+| timeout | default 10000; range 100..300000 ms |
+| maxAttempts | default 3; range 1..25 |
+| backoffMs | default 1000; range 100..3600000 |
+
+`firstRun(now)`:
+
+- cron → `nextAfter(now)`
+- at → that instant
+- neither → `now`
+
+`nextAfter(prev)`:
+
+- one-shot → `null`
+- cron → parse, convert `prev` to the task timezone, ask cron-utils for the
+  next execution, convert back to UTC. `prev` is the **previous scheduled
+  time**, not `now`, so missed runs during an outage catch up.
+
+`newJob(at)` copies `tenantId`, `taskId`, `priority`, `request`, `timeoutMs`,
+and `retry`, sets `scheduledAt = at`, `nextAttemptAt = at`, `status = PENDING`,
+`attempt = 0`, and a fresh UUID. This copy is the rule that makes edits safe.
+
+### 5.4 `Job`
+
+Fields:
+
+```text
+id, tenantId, taskId, scheduledAt, priority, request,
+timeoutMs, retry, status, attempt, nextAttemptAt,
+workerId, leaseExpiresAt, httpStatus, error, responseBody,
+createdAt, startedAt, finishedAt
+```
+
+`apply(Result r)`:
+
+```text
+httpStatus = r.httpStatus
+responseBody = truncate(r.body, 1000)
+error = r.error
+
+if error is empty and not r.ok():
+    error = "http status " + r.httpStatus
+
+startedAt = r.startedAt
+workerId = null
+leaseExpiresAt = null
+
+if r.ok():
+    status = SUCCEEDED
+    finishedAt = r.finishedAt
+    error = ""
+else if attempt >= retry.maxAttempts:
+    status = DEAD
+    finishedAt = r.finishedAt
+else:
+    status = PENDING
+    nextAttemptAt = r.finishedAt + backoff(retry.backoffMs, attempt)
+```
+
+`Result.ok()` means `error` is empty **and** `200 <= httpStatus < 300`.
+
+### 5.5 `Backoff`
+
+```text
+millis = backoffMs * 2^(attempt - 1)
+millis = min(millis, 3_600_000)
+```
+
+Use `long` arithmetic and guard against overflow. For example
+`base * (1L << (attempt - 1))` only after capping the shift, or use
+`Math.pow` like the Go version. The result is always at most one hour.
+
+### 5.6 `FairPick`
+
+Input: a list of `(jobId, tenantId)` candidates in preference order, and a
+maximum `n`.
+
+Algorithm:
+
+1. Remove duplicate job ids, keeping the first occurrence.
+2. Count distinct tenants.
+3. `share = ceil(n / tenantCount)`.
+4. First pass: walk candidates in order; take a job only if its tenant has
+   fewer than `share` picks.
+5. Second pass: fill any remaining slots from the skipped candidates
+   (work-conserving).
+6. Return at most `n` ids.
+
+This prevents one tenant from taking the whole claim batch while still using
+all free worker slots.
+
+### 5.7 `CronSchedule`
+
+Wrapper around `cron-utils`:
+
+```java
+CronDefinition definition =
+    CronDefinitionBuilder.instanceDefinitionFor(CronType.UNIX);
+CronParser parser = new CronParser(definition);
+```
+
+`validate(expression)` parses or throws `DomainException`.
+
+`next(expression, zone, afterInstant)`:
+
+```java
+Cron cron = parser.parse(expression);
+ExecutionTime time = ExecutionTime.forCron(cron);
+ZonedDateTime zoned = afterInstant.atZone(zone);
+ZonedDateTime next = time.nextExecution(zoned).orElse(null);
+return next == null ? null : next.toInstant();
+```
+
+---
+
+## 6. Database design
+
+File: `deploy/mysql/schema.sql`. The `mysql` container loads it on first start.
+All times are UTC and stored as `DATETIME(3)`.
+
+### 6.1 `tasks`
+
+Identical to the reference:
+
+```sql
+CREATE TABLE IF NOT EXISTS tasks (
+  id              CHAR(36)     NOT NULL PRIMARY KEY,
+  tenant_id       VARCHAR(64)  NOT NULL,
+  name            VARCHAR(255) NOT NULL,
+  cron_expr       VARCHAR(255) NULL,
+  timezone        VARCHAR(64)  NOT NULL DEFAULT 'UTC',
+  run_at          DATETIME(3)  NULL,
+  priority        TINYINT      NOT NULL,
+  method          VARCHAR(10)  NOT NULL,
+  url             VARCHAR(2048) NOT NULL,
+  secret          BLOB NULL,
+  timeout_ms      INT          NOT NULL,
+  max_attempts    INT          NOT NULL,
+  backoff_ms      INT          NOT NULL,
+  status          ENUM('active','paused','deleted') NOT NULL,
+  next_run_at     DATETIME(3)  NULL,
+  idempotency_key VARCHAR(255) NULL,
+  version         INT          NOT NULL,
+  created_at      DATETIME(3)  NOT NULL,
+  updated_at      DATETIME(3)  NOT NULL,
+  KEY idx_tenant (tenant_id, created_at),
+  KEY idx_due (status, next_run_at),
+  UNIQUE KEY uq_idem (tenant_id, idempotency_key)
+) ENGINE=InnoDB;
+```
+
+`secret` is the AES-GCM blob of `{headers, body}`. `cron_expr` and `run_at`
+are nullable; `status = 'deleted'` is a soft delete.
+
+### 6.2 `jobs` — the hot table and the queue
+
+```sql
+CREATE TABLE IF NOT EXISTS jobs (
+  id               CHAR(36)     NOT NULL PRIMARY KEY,
+  tenant_id        VARCHAR(64)  NOT NULL,
+  task_id          CHAR(36)     NOT NULL,
+  scheduled_at     DATETIME(3)  NOT NULL,
+  priority         TINYINT      NOT NULL,
+  method           VARCHAR(10)  NOT NULL,
+  url              VARCHAR(2048) NOT NULL,
+  secret           BLOB NULL,
+  timeout_ms       INT          NOT NULL,
+  max_attempts     INT          NOT NULL,
+  backoff_ms       INT          NOT NULL,
+  status           ENUM('pending','running','succeeded','dead') NOT NULL,
+  attempt          INT          NOT NULL DEFAULT 0,
+  next_attempt_at  DATETIME(3)  NOT NULL,
+  worker_id        VARCHAR(64)  NULL,
+  lease_expires_at DATETIME(3)  NULL,
+  http_status      INT          NULL,
+  error            VARCHAR(1024) NULL,
+  response_body    VARCHAR(1024) NULL,
+  created_at       DATETIME(3)  NOT NULL,
+  started_at       DATETIME(3)  NULL,
+  finished_at      DATETIME(3)  NULL,
+  KEY idx_claim   (status, priority, next_attempt_at),
+  KEY idx_oldest  (status, next_attempt_at),
+  KEY idx_lease   (status, lease_expires_at),
+  KEY idx_archive (status, finished_at),
+  KEY idx_dlq     (tenant_id, status),
+  KEY idx_task    (tenant_id, task_id, scheduled_at),
+  UNIQUE KEY uq_task_run (task_id, scheduled_at)
+) ENGINE=InnoDB;
+```
+
+`id` is also the `Idempotency-Key` sent to the endpoint. `attempt` is the
+fencing token.
+
+### 6.3 `job_history`
+
+This is the Java version's replacement for Cassandra. It is append-only until
+the 30-day cleanup.
+
+```sql
+CREATE TABLE IF NOT EXISTS job_history (
+  id           CHAR(36)     NOT NULL PRIMARY KEY,
+  tenant_id    VARCHAR(64)  NOT NULL,
+  task_id      CHAR(36)     NOT NULL,
+  scheduled_at DATETIME(3)  NOT NULL,
+  priority     TINYINT      NOT NULL,
+  method       VARCHAR(10)  NOT NULL,
+  url          VARCHAR(2048) NOT NULL,   -- sanitized: no userinfo/query/fragment
+  timeout_ms   INT          NOT NULL,
+  max_attempts INT          NOT NULL,
+  backoff_ms   INT          NOT NULL,
+  status       ENUM('succeeded','dead') NOT NULL,
+  attempt      INT          NOT NULL,
+  http_status  INT          NULL,
+  error        VARCHAR(1024) NULL,
+  created_at   DATETIME(3)  NOT NULL,
+  started_at   DATETIME(3)  NULL,
+  finished_at  DATETIME(3)  NULL,
+  archived_at  DATETIME(3)  NOT NULL,
+  KEY idx_history_task (tenant_id, task_id, scheduled_at),
+  KEY idx_history_old (archived_at)
+) ENGINE=InnoDB;
+```
+
+History **never stores**:
+
+- request headers,
+- request body,
+- response body,
+- the `secret` blob,
+- the full URL with query string or userinfo.
+
+### 6.4 Time handling
+
+- All instants in Java are `java.time.Instant` (UTC).
+- Use `ps.setTimestamp(i, Timestamp.from(instant))`.
+- Read with `rs.getTimestamp("...").toInstant()`.
+- JDBC URL must use UTC, for example:
+
+```text
+jdbc:mysql://localhost:3306/crobat
+  ?useSSL=false
+  &allowPublicKeyRetrieval=true
+  &connectionTimeZone=UTC
+  &forceConnectionTimeZoneToSession=true
+```
+
+- Never use `java.util.Date` or `Calendar` in new code.
+
+---
+
+## 7. Database layer
+
+### 7.1 `Database`
+
+Responsibilities:
+
+- hold the JDBC URL, user, and password;
+- `getConnection()` returns a new `Connection`;
+- `ping()` for startup;
+- no SQL, no transactions, no business logic.
+
+```java
+public Connection getConnection() throws SQLException {
+    return DriverManager.getConnection(url, user, password);
+}
+```
+
+Every store method uses try-with-resources.
+
+### 7.2 `SecretsCipher`
+
+- Key: 32 bytes decoded from base64 `SECRETS_KEY`.
+- Algorithm: `AES/GCM/NoPadding`.
+- Nonce: 12 random bytes from `SecureRandom`.
+- Output: `nonce || ciphertext || tag` as a `byte[]` in the `secret` BLOB.
+- Plaintext: JSON `{"h": {...}, "b": "..."}`.
+- If there are no headers and no body, store `NULL`.
+- Decryption failure returns an error such as
+  `"secret: cannot decrypt (wrong SECRETS_KEY?)"`.
+- Never put the plaintext in a log or exception message.
+
+Methods:
+
+```java
+byte[] seal(RequestSpec request)
+void open(byte[] blob, RequestSpec target)
+```
+
+### 7.3 `TaskStore`
+
+Methods:
+
+```java
+Task create(Task task, Job firstJob)
+Task get(String tenantId, String id)
+List<Task> list(String tenantId, int limit)
+void update(Task task)
+int scheduleDue(Instant horizon, int limit, JobPlanner planner)
+```
+
+`JobPlanner` is a small interface:
+
+```java
+public interface JobPlanner {
+    List<Job> plan(Task task);
+}
+```
+
+`create`:
+
+1. begin transaction;
+2. insert the task;
+3. on duplicate key `(tenant_id, idempotency_key)`, roll back and select the
+   existing row by that key, then return it;
+4. if `firstJob != null`, insert it;
+5. commit.
+
+`update` uses optimistic concurrency:
+
+```sql
+UPDATE tasks
+SET name=?, cron_expr=?, timezone=?, run_at=?, priority=?,
+    method=?, url=?, secret=?, timeout_ms=?, max_attempts=?, backoff_ms=?,
+    status=?, next_run_at=?, version=version+1, updated_at=?
+WHERE id=? AND tenant_id=? AND version=?
+```
+
+If 0 rows are affected, throw `DomainException("task changed concurrently, retry")`.
+Increment `task.version` after a successful update.
+
+`scheduleDue`:
+
+```text
+begin transaction
+SELECT ... FROM tasks
+WHERE status = 'active' AND next_run_at <= ?
+ORDER BY next_run_at
+LIMIT ? FOR UPDATE SKIP LOCKED
+
+for each task:
+    jobs.addAll(planner.plan(task))
+
+INSERT jobs in chunks of 500:
+    INSERT INTO jobs (...) VALUES (...), (...), ...
+    ON DUPLICATE KEY UPDATE id = id
+
+for each task:
+    UPDATE tasks SET next_run_at = ?, version = version + 1 WHERE id = ?
+
+commit
+return number of tasks
+```
+
+`FOR UPDATE SKIP LOCKED` means several schedulers can run at once without
+waiting for each other. The unique key `(task_id, scheduled_at)` means a
+duplicate plan is a no-op. The version bump makes a concurrent edit's stale
+write fail.
+
+### 7.4 `JobStore`
+
+Methods:
+
+```java
+List<Job> claim(String workerId, int n, Instant horizon, Instant now)
+boolean saveResult(Job job, String workerId)
+int releaseExpired(Instant now, int limit)
+List<Job> listArchivable(Instant succeededBefore, Instant deadBefore, int limit)
+void deleteArchived(List<Job> jobs)
+Job get(String tenantId, String id)
+List<Job> listForTask(String tenantId, String taskId, int limit)
+List<Job> listDead(String tenantId, int limit)
+void retryDead(String tenantId, String id, Instant now)
+```
+
+#### Claim
+
+One transaction:
+
+1. **Anti-starvation lane** — oldest due jobs, regardless of priority:
+
+```sql
+SELECT id, tenant_id FROM jobs
+WHERE status = 'pending' AND next_attempt_at <= ?
+ORDER BY next_attempt_at
+LIMIT ? FOR UPDATE SKIP LOCKED
+```
+
+Limit: `max(1, n / 10)`.
+
+2. **Priority lane**:
+
+```sql
+SELECT id, tenant_id FROM jobs
+WHERE status = 'pending' AND next_attempt_at <= ?
+ORDER BY priority, next_attempt_at
+LIMIT ? FOR UPDATE SKIP LOCKED
+```
+
+Limit: `4 * n`.
+
+3. `FairPick` over `oldest + byPriority` to get at most `n` ids.
+4. If empty, commit and return an empty list.
+5. Mark them running:
+
+```sql
+UPDATE jobs
+SET status = 'running',
+    worker_id = ?,
+    attempt = attempt + 1,
+    lease_expires_at =
+        DATE_ADD(GREATEST(next_attempt_at, ?),
+                 INTERVAL ((timeout_ms + 30000) * 1000) MICROSECOND)
+WHERE id IN (?, ?, ...)
+```
+
+The `lease_expires_at` is counted from `GREATEST(next_attempt_at, now)`, not
+from the claim. Otherwise the reconciler would steal jobs that are simply
+waiting for their scheduled second.
+
+6. Select the full job rows.
+7. **Commit before returning.** No HTTP call happens inside the transaction.
+
+Deadlock handling: wrap `claim` and `saveResult` in a small retry:
+
+```text
+for attempt 1..4:
+    try the transaction
+    catch SQLException with vendor code 1213 (deadlock)
+          or 1205 (lock wait timeout):
+        sleep 5 * attempt ms, retry
+    otherwise rethrow
+```
+
+#### Save result (the fencing guard)
+
+```sql
+UPDATE jobs
+SET status = ?, next_attempt_at = ?, worker_id = NULL,
+    lease_expires_at = NULL, http_status = ?, error = ?,
+    response_body = ?, started_at = ?, finished_at = ?
+WHERE id = ?
+  AND status = 'running'
+  AND worker_id = ?
+  AND attempt = ?
+```
+
+- 1 row affected → this executor still owns the job.
+- 0 rows affected → the job was rescued or claimed by someone else. Log
+  `"result fenced off"` and do nothing else. This is correct behavior.
+- Truncate `error` and `response_body` to 1000 characters before binding.
+
+#### Release expired leases
+
+```sql
+UPDATE jobs
+SET status = IF(attempt >= max_attempts, 'dead', 'pending'),
+    finished_at = IF(attempt >= max_attempts, ?, NULL),
+    next_attempt_at = ?,
+    worker_id = NULL,
+    lease_expires_at = NULL,
+    error = 'lease expired: executor lost'
+WHERE status = 'running'
+  AND lease_expires_at < ?
+LIMIT ?
+```
+
+#### Archivable jobs
+
+```sql
+(SELECT ... FROM jobs
+ WHERE status = 'succeeded' AND finished_at < ?
+ LIMIT ?)
+UNION ALL
+(SELECT ... FROM jobs
+ WHERE status = 'dead' AND finished_at < ?
+ LIMIT ?)
+```
+
+The first limit is `limit - limit / 2`; the second is `limit / 2`.
+
+#### Delete archived
+
+Delete one row at a time, guarded by status and attempt:
+
+```sql
+DELETE FROM jobs
+WHERE id = ? AND status = ? AND attempt = ?
+```
+
+A DLQ retry that happened between the archive read and this delete will not
+match, so the job stays in the hot table.
+
+#### DLQ retry
+
+```sql
+UPDATE jobs
+SET status = 'pending',
+    next_attempt_at = ?,
+    max_attempts = attempt + 1,
+    finished_at = NULL
+WHERE id = ? AND tenant_id = ? AND status = 'dead'
+```
+
+If 0 rows are affected, throw `NotFoundException`.
+
+### 7.5 `HistoryStore`
+
+Methods:
+
+```java
+void archive(List<Job> jobs)
+Job get(String tenantId, String id)
+List<Job> listForTask(String tenantId, String taskId, int limit)
+int deleteOlderThan(Instant cutoff)
+```
+
+`archive` uses:
+
+```sql
+INSERT INTO job_history (...)
+VALUES (...), (...)
+ON DUPLICATE KEY UPDATE id = id
+```
+
+Before insert, sanitize the URL:
+
+- parse with `java.net.URI`;
+- drop userinfo, query, and fragment;
+- keep scheme, host, port, and path.
+
+This makes re-archiving idempotent. The history row has no secret, headers,
+request body, or response body.
+
+---
+
+## 8. Services
+
+### 8.1 `TaskService`
+
+```java
+Task create(String tenantId, String idempotencyKey, Task input)
+Task get(String tenantId, String id)
+List<Task> list(String tenantId)
+Task update(String tenantId, String id, Task input)
+Task pause(String tenantId, String id)
+Task resume(String tenantId, String id)
+void delete(String tenantId, String id)
+```
+
+`create`:
+
+```text
+input.normalize()
+now = Instant.now()
+input.id = UUID.randomUUID().toString()
+input.tenantId = tenantId
+input.idempotencyKey = header value (max 255)
+input.status = ACTIVE
+input.version = 1
+input.createdAt = now
+input.updatedAt = now
+
+if no cron and no at:
+    firstJob = input.newJob(now)   // "now" does not wait for the scheduler
+else:
+    input.nextRunAt = input.firstRun(now)
+    firstJob = null
+
+return taskStore.create(input, firstJob)
+```
+
+Important: the task and its first "now" job are inserted in the **same
+transaction**. A critical "now" job is claimable on the next executor poll.
+
+`update`:
+
+1. load the existing task (tenant-scoped);
+2. normalize the input;
+3. remember whether `cron`, `timezone`, or `at` changed;
+4. replace only editable fields;
+5. if the schedule changed, recompute `nextRunAt` from `now`;
+6. save with the optimistic version check.
+
+Existing jobs are untouched.
+
+`pause` / `resume` / `delete`:
+
+- `pause` → status `PAUSED`; do not delete already-planned jobs (≤ 30 s
+  ahead). A job is the plan.
+- `resume` → status `ACTIVE`. For a cron task, recompute `nextRunAt` from
+  `now` so runs missed while paused are skipped on purpose.
+- `delete` → status `DELETED`, `nextRunAt = null`. Soft delete; history stays
+  queryable.
+
+### 8.2 `SchedulerLoop`
+
+Fields: `TaskStore`, interval (default 5 s), lookahead (default 30 s), batch
+(default 500).
+
+Every tick:
+
+```java
+Instant horizon = Instant.now().plus(lookahead);
+int handled = taskStore.scheduleDue(horizon, batch, task -> {
+    List<Job> jobs = new ArrayList<>();
+    int count = 0;
+    while (task.nextRunAt != null
+           && !task.nextRunAt.isAfter(horizon)
+           && count < 1000) {
+        jobs.add(task.newJob(task.nextRunAt));
+        task.nextRunAt = task.nextAfter(task.nextRunAt);
+        count++;
+    }
+    return jobs;
+});
+```
+
+- The query has **no lower bound**. A late scheduler delays runs but never
+  skips them.
+- `nextAfter` uses the previous `nextRunAt`, so missed runs during an outage
+  catch up.
+- At most 1000 jobs per task per tick; the rest wait for the next tick.
+- If `handled == batch`, run again immediately; otherwise wait for the next
+  interval.
+
+Use `scheduleWithFixedDelay` or a loop with `Thread.sleep`. Do not let an
+exception kill the loop: catch, log, and continue on the next tick.
+
+### 8.3 `ExecutorLoop`
+
+Fields: `JobStore`, `HttpCaller`, `workerId`, workers (default 64), poll
+(default 500 ms).
+
+State:
+
+- `Semaphore slots = new Semaphore(workers);`
+- `AtomicInteger inFlight = new AtomicInteger();`
+- `ScheduledThreadPoolExecutor timers` with enough threads for in-flight
+  jobs.
+- a wake signal (`Semaphore wake = new Semaphore(0)`) so a finished job can
+  trigger an immediate claim.
+
+Main loop:
+
+```text
+while running:
+    free = workers - inFlight.get()
+    if free > 0:
+        now = Instant.now()
+        jobs = jobStore.claim(workerId, free, now.plus(poll), now)
+        for job in jobs:
+            slots.acquire()
+            inFlight.incrementAndGet()
+            delay = max(0, job.nextAttemptAt - now)
+            timers.schedule(() -> fire(job), delay, MILLISECONDS)
+
+    wait for:
+        poll interval, or
+        wake signal, or
+        shutdown
+```
+
+`fire(job)`:
+
+```text
+try:
+    Result r = caller.call(job)
+    job.apply(r)
+    boolean saved = jobStore.saveResult(job, workerId)
+    log job id, task id, attempt, status, http status,
+        lag_ms = r.startedAt - job.scheduledAt
+    if not saved:
+        log "result fenced off"
+finally:
+    inFlight.decrementAndGet()
+    slots.release()
+    wake.release()      // let the main loop claim more work
+```
+
+Precision comes from the per-job timer, not from polling the database often.
+Polling every 500 ms only decides *when to claim*; the timer decides *when to
+call*.
+
+Each job holds a worker slot while it waits for its timer. That mirrors the
+Go design and keeps `workers` as the true in-flight limit.
+
+### 8.4 `ReconcilerLoop`
+
+Every 5 s (default), batch 1000:
+
+```java
+int n = jobStore.releaseExpired(Instant.now(), batch);
+```
+
+If `n == batch`, run again immediately; otherwise wait. The SQL does all the
+work atomically.
+
+### 8.5 `ArchiverLoop`
+
+Fields: `JobStore`, `HistoryStore`, interval (10 s), batch (500),
+`succeededAfter` (1 h), `deadAfter` (14 days), `historyTtl` (30 days).
+
+Tick:
+
+```text
+now = Instant.now()
+jobs = jobStore.listArchivable(
+           now.minus(succeededAfter),
+           now.minus(deadAfter),
+           batch)
+if jobs is empty: return
+
+historyStore.archive(jobs)       // first
+jobStore.deleteArchived(jobs)    // second
+
+historyStore.deleteOlderThan(now.minus(historyTtl))
+```
+
+A crash between archive and delete leaves a duplicate, never a lost job.
+`JobService` deduplicates by job id when reading history.
+
+### 8.6 `JobService`
+
+```java
+Job get(String tenantId, String id)
+List<Job> taskHistory(String tenantId, String taskId, int limit)
+List<Job> dlq(String tenantId)
+Job retry(String tenantId, String id)
+```
+
+`get`: try `jobStore.get`; on `NotFoundException`, try `historyStore.get`.
+
+`taskHistory`:
+
+1. read hot jobs for the task (limit);
+2. read history for the task (limit);
+3. concatenate;
+4. deduplicate by id, keeping the first occurrence;
+5. sort by `scheduledAt` descending;
+6. return at most `limit`.
+
+`dlq`: `jobStore.listDead(tenantId, 500)`.
+
+`retry`: `jobStore.retryDead(tenantId, id, now)`, then `get`.
+
+---
+
+## 9. HTTP API
+
+Both APIs use the same `Router` and `Jwt` classes. The tenant is always the
+JWT `sub` claim.
+
+### 9.1 Authentication
+
+`Jwt.tenantFrom(request, secret)`:
+
+1. read `Authorization`; require the exact prefix `Bearer `;
+2. split the token on `.`; require three parts;
+3. base64url-decode the header;
+4. require `alg` to be exactly `HS256` (reject `none`, RS256, missing);
+5. compute `HMAC-SHA256(secret, header + "." + payload)`;
+6. compare with `MessageDigest.isEqual`;
+7. decode the payload;
+8. require a non-empty `sub` of at most 64 characters;
+9. require `exp` to be present and in the future;
+10. return the `sub`.
+
+Any failure → HTTP 401:
+`{"error":"invalid or missing bearer token"}`.
+
+`Jwt.sign(secret, tenant, ttlSeconds)` is used by the CLI:
+
+```json
+{"alg":"HS256","typ":"JWT"}
+{"sub":"acme","exp":1735689600}
+```
+
+Base64url without padding, signature = HMAC-SHA256.
+
+### 9.2 Router behavior
+
+- `GET /healthz` is unauthenticated and returns `ok`.
+- All other routes require a valid JWT.
+- Body limit: 256 KiB. Read at most `256 * 1024 + 1` bytes; if larger, return
+  400 with `{"error":"request body too large"}`.
+- JSON parsing rejects unknown fields
+  (`DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES`).
+- Errors:
+  - `DomainException` → 400, message from the exception;
+  - `NotFoundException` → 404;
+  - anything else → 500, log the cause, return
+    `{"error":"internal error"}`.
+- Never log the request body, headers, or full URL.
+- Always set `Content-Type: application/json`.
+- `DELETE /tasks/{id}` returns 204 with no body.
+
+### 9.3 Task API — port 8080
+
+| Method and path | Status | Body |
+|---|---|---|
+| `POST /tasks` | 201 | task input; optional `Idempotency-Key` header |
+| `GET /tasks` | 200 | list of up to 500 tasks |
+| `GET /tasks/{id}` | 200 | one task |
+| `PUT /tasks/{id}` | 200 | full replacement input |
+| `POST /tasks/{id}/pause` | 200 | task |
+| `POST /tasks/{id}/resume` | 200 | task |
+| `DELETE /tasks/{id}` | 204 | — |
+
+Task input:
+
+```json
+{
+  "name": "daily-report",
+  "cron": "0 9 * * *",
+  "timezone": "Europe/Madrid",
+  "priority": "high",
+  "request": {
+    "method": "POST",
+    "url": "https://api.example.com/run",
+    "headers": {"Authorization": "Bearer ..."},
+    "body": "{}"
+  },
+  "timeout_ms": 10000,
+  "retry": {"max_attempts": 3, "backoff_ms": 1000}
+}
+```
+
+Use `"at": "2026-12-01T09:00:00Z"` instead of `cron` for a one-shot task. Omit
+both to run now.
+
+Task response: same fields plus `id`, `status`, `next_run_at`, `version`,
+`created_at`, `updated_at`. `request.headers`, `request.body`, and
+`idempotency_key` are never returned.
+
+### 9.4 Job API — port 8081
+
+| Method and path | Status | Body |
+|---|---|---|
+| `GET /jobs/{id}` | 200 | job status, from hot table or history |
+| `POST /jobs/{id}/retry` | 200 | job, after returning it to pending |
+| `GET /tasks/{id}/jobs?limit=n` | 200 | merged history, newest first |
+| `GET /dlq` | 200 | up to 500 dead jobs |
+
+`limit` defaults to 50; values ≤ 0 or > 500 become 50.
+
+### 9.5 Echo API — default port 8083 (port 80 in Compose)
+
+Used only by the demo:
+
+- `/fail` → 500 `"boom"`;
+- `/flaky` → 503 `"try again"` when `X-Attempt < 2`, otherwise 200
+  `"ok on retry"`;
+- `/slow?ms=N` → sleep N ms, then 200;
+- anything else → 200 `"ok"`.
+
+Log the `Idempotency-Key`, `X-Attempt`, and `lag_ms`
+(`now - X-Scheduled-At`) so the demo shows retries and scheduling lag.
+
+---
+
+## 10. Outbound HTTP and SSRF
+
+### 10.1 `HttpCaller`
+
+Use `java.net.http.HttpClient`:
+
+```java
+HttpClient client = HttpClient.newBuilder()
+    .connectTimeout(Duration.ofSeconds(5))
+    .followRedirects(HttpClient.Redirect.NEVER)
+    .proxy(new ProxySelector() {
+        @Override
+        public List<Proxy> select(URI uri) {
+            return List.of(Proxy.NO_PROXY);
+        }
+        @Override
+        public void connectFailed(URI uri, SocketAddress sa, IOException e) { }
+    })
+    .build();
+```
+
+For each job:
+
+1. `SsrfGuard.check(uri, allowCidrs)`.
+2. Build a `HttpRequest` with the job's method, URI, and body.
+3. Set the job's headers.
+4. Set:
+   - `Idempotency-Key: <job id>`
+   - `X-Scheduled-At: <ISO-8601 UTC>`
+   - `X-Attempt: <attempt>`
+   - `User-Agent: crobat-java-executor`
+5. Set a per-request timeout from `job.timeoutMs`.
+6. Send with `BodyHandlers.ofInputStream()` or `ofByteArray()`.
+7. Read at most 1024 bytes of the response body.
+8. Return `Result` with `startedAt`, `finishedAt`, `httpStatus`, `body`, and a
+   generic error string.
+
+Never put the URL in an error string. Errors become:
+
+- `"destination not allowed"` for SSRF blocks;
+- `"timeout"` for `HttpTimeoutException`;
+- `"network error"` for `ConnectException` / `IOException`;
+- `"request failed"` for anything else.
+
+### 10.2 `SsrfGuard`
+
+Allowed:
+
+- scheme `http` or `https`;
+- port 80 or 443 (explicit or default);
+- every resolved address is a public unicast address.
+
+Rejected:
+
+- loopback (`127.0.0.0/8`, `::1`);
+- private (`10/8`, `172.16/12`, `192.168/16`);
+- link-local (`169.254/16`, including `169.254.169.254`, `fe80::/10`);
+- any-local (`0.0.0.0`, `::`);
+- multicast;
+- `0.0.0.0/8`;
+- CGNAT `100.64.0.0/10`;
+- `192.0.0.0/24`;
+- `198.18.0.0/15`;
+- IPv6 ULA `fc00::/7`;
+- NAT64 `64:ff9b::/96`;
+- IPv4-mapped IPv6 forms of all of the above (unmap first).
+
+Implementation outline:
+
+```java
+URI uri = URI.create(url);
+String scheme = uri.getScheme();
+if (!"http".equals(scheme) && !"https".equals(scheme)) fail();
+int port = uri.getPort() == -1 ? ("https".equals(scheme) ? 443 : 80) : uri.getPort();
+if (port != 80 && port != 443) fail();
+
+InetAddress[] addresses = InetAddress.getAllByName(uri.getHost());
+for (InetAddress address : addresses) {
+    if (!isAllowed(address, allowCidrs)) fail();
+}
+```
+
+`isAllowed` checks the allowlist first (dev only), then the public-address
+rules. For IPv4, read the four bytes and compare ranges. For IPv6, read the
+16 bytes and compare prefixes.
+
+`EXECUTOR_ALLOW_CIDRS` accepts comma-separated CIDRs such as
+`172.28.0.100/32`. It is for local Docker only. Log a warning at startup when
+it is set.
+
+**Residual risk:** Java's built-in client resolves the host again when it
+connects, so a malicious DNS server could change the answer between the check
+and the connection. This is a known simplification. The normal SSRF attacks
+(metadata IP, localhost, private network) are blocked. If the course requires
+the exact Go behavior, replace `HttpCaller` with an Apache HttpClient 5
+`DnsResolver` that validates at resolution time, or a tiny socket-level
+client. Do not pretend the check is stronger than it is.
+
+---
+
+## 11. Configuration
+
+Read environment variables in `Config`. Do not add a `.env` parser; Docker
+Compose and the shell set the variables.
+
+| Variable | Default | Used by |
+|---|---|---|
+| `MYSQL_URL` | `jdbc:mysql://localhost:3306/crobat?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true` | all DB modes |
+| `MYSQL_USER` | `crobat` | all DB modes |
+| `MYSQL_PASSWORD` | `crobat` | all DB modes |
+| `SECRETS_KEY` | required; base64 of 32 bytes | all except echo/cli |
+| `JWT_SECRET` | required for APIs and `token` | task-api, job-api, cli |
+| `TASK_API_PORT` | `8080` | task-api |
+| `JOB_API_PORT` | `8081` | job-api |
+| `ECHO_PORT` | `8083` (Compose: `80`) | echo |
+| `SCHEDULER_INTERVAL_MS` | `5000` | scheduler |
+| `SCHEDULER_LOOKAHEAD_MS` | `30000` | scheduler |
+| `SCHEDULER_BATCH` | `500` | scheduler |
+| `EXECUTOR_WORKERS` | `64` | executor |
+| `EXECUTOR_POLL_MS` | `500` | executor |
+| `WORKER_ID` | hostname + pid | executor |
+| `EXECUTOR_ALLOW_CIDRS` | empty | executor (dev only) |
+| `RECONCILER_INTERVAL_MS` | `5000` | reconciler |
+| `RECONCILER_BATCH` | `1000` | reconciler |
+| `ARCHIVER_INTERVAL_MS` | `10000` | archiver |
+| `ARCHIVER_BATCH` | `500` | archiver |
+| `ARCHIVE_SUCCEEDED_AFTER_MINUTES` | `60` | archiver |
+| `ARCHIVE_DEAD_AFTER_HOURS` | `336` | archiver |
+| `HISTORY_TTL_DAYS` | `30` | archiver |
+| `CROBAT_TOKEN` | — | CLI |
+| `CROBAT_TASK_API` | `http://localhost:8080` | CLI |
+| `CROBAT_JOB_API` | `http://localhost:8081` | CLI |
+
+`Config` should use typed getters:
+
+```java
+String getString(String name, String defaultValue)
+int getInt(String name, int defaultValue)
+long getLong(String name, long defaultValue)
+String requireString(String name)
+```
+
+A malformed number must fail at startup with a message naming the variable.
+
+---
+
+## 12. Concurrency and lifecycle
+
+- Use one thread per background loop, plus the HTTP server's fixed thread pool
+  (for example 16 threads per API).
+- Use one dedicated thread per scheduler/reconciler/archiver loop. Use a
+  `ScheduledThreadPoolExecutor` for per-job timers.
+- Name threads (`crobat-scheduler`, `crobat-executor`, `crobat-task-api-...`)
+  so logs are readable.
+- Every loop catches `Exception`, logs it, and continues with the next tick.
+  A failed database call must not stop the service.
+- On shutdown:
+  1. stop accepting HTTP requests (`HttpServer.stop(10)`);
+  2. stop claiming new jobs;
+  3. let in-flight calls finish for up to 10 seconds;
+  4. shut down executors.
+- Do not hold a database transaction across an HTTP call.
+- Do not use `synchronized` to coordinate workers. The database row and the
+  `attempt` guard are the coordination.
+- Do not cache jobs in memory beyond the in-flight timers.
+
+---
+
+## 13. CLI and demo
+
+`Main` with `cli` delegates to `Cli.run(args)`.
+
+Commands:
+
+```text
+token <tenant>
+
+task create [flags]
+task update <id> [flags]
+task list
+task get <id>
+task pause <id>
+task resume <id>
+task delete <id>
+
+job get <id>
+job history <task-id> [-limit n]
+job dlq
+job retry <id>
+```
+
+Create/update flags:
+
+```text
+-name <name>                 required
+-url <url>                   required
+-method <method>             default POST
+-body <json>                 default empty
+-header "Name: value"        repeatable
+-cron "<expr>"               optional
+-at <RFC3339>                optional
+-tz <zone>                   default UTC
+-priority <p>                default normal
+-timeout-ms <n>              default 10000
+-max-attempts <n>            default 3
+-backoff-ms <n>              default 1000
+-idempotency-key <key>       optional
+```
+
+Write a tiny `CliArgs` parser; do not add a CLI library. It only needs
+`-name value`, repeated `-header`, and a positional id.
+
+The CLI calls the APIs with `HttpClient`, sets `Authorization: Bearer`, sends
+`Content-Type: application/json`, and pretty-prints the response with Jackson.
+Exit code 0 on success, 1 on any error or HTTP status ≥ 400.
+
+---
+
+## 14. Docker and local run
+
+### 14.1 `Dockerfile`
+
+Multi-stage:
+
+```dockerfile
+FROM maven:3.9-eclipse-temurin-17 AS build
+WORKDIR /app
+COPY pom.xml .
+RUN mvn -q dependency:go-offline
+COPY src ./src
+RUN mvn -q package
+
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+COPY --from=build /app/target/crobat-java-1.0.jar app.jar
+ENTRYPOINT ["java", "-jar", "app.jar"]
+CMD ["all"]
+```
+
+### 14.2 `docker-compose.yml`
+
+Services:
+
+- `mysql` — image `mysql:8.4`, mounts `deploy/mysql/schema.sql`, health check;
+- `app` — builds this repo, runs `all`, ports 8080 and 8081;
+- `echo` — same image, command `["echo"]`, `ECHO_PORT=80`, host port 8083.
+
+Environment for `app`: `MYSQL_URL`, `MYSQL_USER`, `MYSQL_PASSWORD`,
+`SECRETS_KEY`, `JWT_SECRET`, `ECHO_PORT`, and optionally
+`EXECUTOR_ALLOW_CIDRS=172.28.0.100/32` if the echo container is on a fixed
+private address.
+
+If the executor's SSRF guard blocks the echo container, use one of:
+
+- `EXECUTOR_ALLOW_CIDRS` for the echo container's address (dev only), or
+- run the demo with echo on a public test endpoint.
+
+Do not disable SSRF globally.
+
+### 14.3 Run
+
+```bash
+docker compose up -d --build
+
+export JWT_SECRET=dev-only-jwt-secret-change-me
+export CROBAT_TOKEN=$(java -jar target/crobat-java-1.0.jar cli token acme)
+
+java -jar target/crobat-java-1.0.jar cli task create \
+  -name hello -url http://echo/hello -priority critical
+
+java -jar target/crobat-java-1.0.jar cli task list
+java -jar target/crobat-java-1.0.jar cli job dlq
+```
+
+For local (non-Docker) runs, start MySQL with the schema, export
+`MYSQL_URL`, `MYSQL_USER`, `MYSQL_PASSWORD`, `SECRETS_KEY`, and `JWT_SECRET`,
+then run `java -jar ... all`.
+
+---
+
+## 15. Tests
+
+### 15.1 Unit tests (no database)
+
+| Test class | Checks |
+|---|---|
+| `TaskNormalizeTest` | defaults, name bounds, cron/at conflict, timezone, method, URL, timeout/retry ranges |
+| `CronScheduleTest` | `0 9 * * *` in `Europe/Madrid` across DST; next run from previous run, not now |
+| `JobApplyTest` | 2xx → succeeded; failure with attempts left → pending + backoff; exhausted → dead |
+| `BackoffTest` | doubling, cap at 1 hour, attempt 1 uses base |
+| `FairPickTest` | tenant share, two-pass fill, duplicate ids |
+| `JwtTest` | valid token; expired; wrong secret; `alg: none`; malformed parts; long `sub` |
+| `SsrfGuardTest` | localhost, 10/8, 169.254.169.254, CGNAT, IPv6 ULA rejected; public IP and allowlist accepted |
+| `SecretsCipherTest` | round trip; wrong key fails; plaintext not equal to ciphertext |
+
+### 15.2 Database integration test (MySQL required)
+
+`DbIntegrationTest` is skipped unless `RUN_DB_TESTS=1`. It uses a dedicated
+database, for example `crobat_test`, never the demo data. It covers the
+idempotent create, claim, fencing, archive, and secret-free history paths.
+The smoke run against the full stack also checks flaky retry, DLQ, manual
+retry, one-shot scheduling, pause/resume/delete, tenant isolation, and SSRF.
+
+### 15.3 Manual end-to-end scenario
+
+1. Start MySQL + app + echo.
+2. Mint a token for tenant `acme`.
+3. Create a `now` task at `/hello`; verify it succeeds.
+4. Create a `0 9 * * *` task; verify `next_run_at`.
+5. Create a `/flaky` task; verify attempt 2 succeeds.
+6. Create a `/fail` task with `max_attempts=2`; verify it ends in the DLQ.
+7. Retry the DLQ job; verify it goes pending and the same idempotency key is
+   sent.
+8. Pause/resume a task; verify planned jobs still run and resume does not
+   replay paused runs.
+9. Set `ARCHIVE_SUCCEEDED_AFTER_MINUTES=0`; verify the job moves to
+   `job_history` and disappears from `jobs`.
+10. Query history; verify the result comes from `job_history`.
+11. Kill the app during a `/slow` call; restart; verify the reconciler returns
+    the job to pending and a later attempt has a higher `attempt` number.
+12. Call `169.254.169.254`; verify `"destination not allowed"`.
+
+---
+
+## 16. Implementation order
+
+Do not skip ahead; each step should compile and be testable.
+
+1. **Scaffold** — `pom.xml`, `Main` with mode parsing, `Config`, logging.
+2. **Schema** — `deploy/mysql/schema.sql`; verify with a local MySQL.
+3. **Domain** — enums, `Task`, `Job`, `Result`, `Backoff`, `FairPick`,
+   `CronSchedule`; unit tests.
+4. **Database foundation** — `Database`, `SecretsCipher`; round-trip test.
+5. **Stores** — `TaskStore`, `JobStore`, `HistoryStore`; integration tests.
+6. **Task API** — `Jwt`, `Json`, `Router`, `TaskApi`, `TaskService`; curl
+   tests.
+7. **Scheduler** — `SchedulerLoop`; verify pending jobs appear 30 s ahead.
+8. **Executor** — `SsrfGuard`, `HttpCaller`, `ExecutorLoop`; verify now/cron
+   calls and retries.
+9. **Reconciler** — `ReconcilerLoop`; verify expired leases.
+10. **Job API** — `JobService`, `JobApi`; status, history, DLQ, retry.
+11. **Archiver** — `ArchiverLoop`; verify history-first behavior.
+12. **CLI + echo** — finish the demo commands.
+13. **Docker Compose** — one command starts the demo.
+14. **End-to-end pass** — run the §15.3 scenario and record results.
+
+---
+
+## 17. Acceptance checklist
+
+The project is complete when all of these are true:
+
+- [ ] `mvn test` passes without a database (unit tests only).
+- [ ] `mvn package` produces a runnable JAR.
+- [ ] `docker compose up -d --build` starts MySQL, app, and echo.
+- [ ] `POST /tasks` returns 201 and persists the task before responding.
+- [ ] A "now" task is claimed and called without waiting for the scheduler.
+- [ ] A cron task produces jobs ahead of time; `next_run_at` advances.
+- [ ] A missed schedule catches up instead of being skipped.
+- [ ] Two executors never claim the same job (integration test).
+- [ ] A 2xx response produces `succeeded`.
+- [ ] A failure with attempts left produces `pending` with exponential
+      backoff.
+- [ ] Exhausted attempts produce `dead` and appear in `/dlq`.
+- [ ] `POST /jobs/{id}/retry` returns a dead job to pending.
+- [ ] A stale result write affects 0 rows (fencing).
+- [ ] An expired lease is returned to pending or dead by the reconciler.
+- [ ] History is written before the hot row is deleted.
+- [ ] History reads merge hot and archived rows without duplicates.
+- [ ] Every attempt carries the same `Idempotency-Key`, plus
+      `X-Scheduled-At` and `X-Attempt`.
+- [ ] Task creation is idempotent on `(tenant, Idempotency-Key)`.
+- [ ] Tenant A cannot read tenant B's tasks or jobs.
+- [ ] Headers/body are not returned by any API.
+- [ ] Headers/body are encrypted at rest and absent from `job_history`.
+- [ ] No log line contains a request body, header value, or full URL with
+      query string.
+- [ ] Calls to localhost, private ranges, and `169.254.169.254` are rejected.
+- [ ] Redirects are not followed.
+- [ ] The JWT rejects expired tokens, wrong secrets, and `alg: none`.
+- [ ] The app shuts down cleanly and leaves no half-committed job.
+
+---
+
+## 18. Go → Java class map
+
+| Go | Java |
+|---|---|
+| `internal/domain/domain.go` | `domain/*.java` |
+| `Priority` | `Priority` enum |
+| `Request`, `RetryPolicy` | `RequestSpec`, `RetryPolicy` |
+| `Task.Normalize` | `Task.normalize()` |
+| `Task.FirstRun`, `NextAfter` | `Task.firstRun`, `Task.nextAfter` |
+| `Task.NewJob` | `Task.newJob` |
+| `Job.Apply` | `Job.apply` |
+| `Backoff` | `Backoff.millis` |
+| `FairPick` | `FairPick.pick` |
+| `internal/app/ports.go` | concrete `TaskStore`, `JobStore`, `HistoryStore` |
+| `internal/services/taskservice` | `TaskService` |
+| `internal/services/scheduler` | `SchedulerLoop` |
+| `internal/services/executor` | `ExecutorLoop` |
+| `internal/services/reconciler` | `ReconcilerLoop` |
+| `internal/services/archiver` | `ArchiverLoop` |
+| `internal/services/jobservice` | `JobService` |
+| `internal/adapter/mysql` | `db/TaskStore`, `db/JobStore`, `db/HistoryStore` |
+| `internal/adapter/cassandra` | `db/HistoryStore` (MySQL table) |
+| `internal/adapter/caller` | `call/HttpCaller`, `call/SsrfGuard` |
+| `internal/adapter/httpapi` | `http/Router`, `TaskApi`, `JobApi`, `Jwt` |
+| `cmd/crobat/main.go` | `Main`, `Cli`, `Config` |
+| `deploy/mysql/schema.sql` | same file, plus `job_history` |
+| `docker-compose.yml` | same idea, fewer services |
+
+---
+
+## 19. Risks and rules to keep the project honest
+
+1. **At-least-once, not exactly-once.** A timeout may still have reached the
+   endpoint. The stable `Idempotency-Key` is the receiver's deduplication
+   tool. Do not claim exactly-once.
+2. **The executor can call twice.** That is why the key exists. The database
+   fencing guard prevents a late result from corrupting the job; it cannot
+   prevent the endpoint from being called twice.
+3. **Do not hold a transaction during HTTP.** Claim and commit first, call
+   second, save third.
+4. **Do not trust the URL at task creation.** Validate again before every
+   call.
+5. **Do not return secrets.** `headers`, `body`, and `idempotency_key` are
+   write-only or absent in JSON.
+6. **Do not log secrets.** Log job ids, attempts, statuses, and durations, not
+   payloads or full URLs.
+7. **One MySQL primary is a classroom limit.** Do not claim 1 billion
+   executions/day. The design is the same; the deployment is not.
+8. **Cassandra is replaced by a table.** If the course requires Cassandra,
+   only `HistoryStore` changes. The rest of the design stays.
+9. **SSRF is not dial-time perfect.** State the limitation in the report.
+10. **Keep it readable.** A working simple design is worth more than a clever
+    one that the team cannot explain.
+
+---
+
+## 20. Report/defense notes
+
+If the professor asks "why no queue?":
+
+> Saving a job and publishing it to a broker are two writes that cannot be
+> atomic. If one fails, they disagree forever. With one MySQL table there is
+> one write. Executors claim rows with `SELECT ... FOR UPDATE SKIP LOCKED`, so
+> they do not block each other. The lease is a column in the same row, and the
+> `attempt` counter is a fencing token that rejects late results.
+
+If asked "why not just use a scheduler library?":
+
+> The library tells you when to run. It does not give you durable jobs,
+> retries, a DLQ, leases, tenant isolation, or a history. Crobat's job is the
+> durable execution, not the cron parser.
+
+If asked "what happens if an executor dies?":
+
+> Its lease expires. The reconciler moves the job back to `pending` (or to
+> `dead` if attempts are exhausted). The next claim increments `attempt`, so
+> the dead executor's late write matches zero rows.
+
+If asked "what did you simplify?":
+
+> History is a MySQL table instead of Cassandra, and the SSRF check runs
+> before the call instead of inside the socket. The queue, leases, fencing,
+> retries, DLQ, and API behavior are the same.
+
+
+---
+
+## 21. Decisions made during implementation
+
+| Decision | Why |
+|---|---|
+| JDK `HttpServer`, hand-written `Router` | No Spring; routing and auth are about 150 lines each and readable |
+| Jackson `SNAKE_CASE` naming | Keeps the Java API compatible with the Go JSON without annotating every field |
+| Dedicated threads for scheduler/reconciler/archiver | Simpler than scheduling fixed-delay tasks; each loop already controls its own sleep |
+| `ScheduledThreadPoolExecutor` only for per-job timers | Each claimed job fires at its own `next_attempt_at`, matching the Go design |
+| One JDBC connection per operation | No pool dependency; easy to read. Add HikariCP later only if needed |
+| `job_history` MySQL table | Removes Cassandra from the course setup; `HistoryStore` is the only class that would change |
+| SSRF check immediately before the call | Java's built-in client has no dialer hook; the normal attacks are blocked and the DNS-rebinding gap is documented |
+| Integration test disabled by default | `mvn test` works on a laptop with no database; run `RUN_DB_TESTS=1` for MySQL |
+| No Maven wrapper | The course environment already expects Maven; `mvn test` is the documented command |
+
+### Verified locally
+
+- `mvn test`: 37 unit tests pass; the MySQL integration test is skipped by default.
+- `DbIntegrationTest` against MySQL 8.4: pass.
+- Full stack: now, one-shot, flaky retry, DLQ, manual retry, archive/history,
+  idempotent create, tenant isolation, secret non-exposure, SSRF block.

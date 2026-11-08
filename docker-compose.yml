@@ -1,0 +1,61 @@
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-dev-only}
+      MYSQL_DATABASE: crobat
+      MYSQL_USER: ${MYSQL_USER:-crobat}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-crobat-dev-only}
+    ports: ["3306:3306"]
+    volumes:
+      - ./deploy/mysql:/docker-entrypoint-initdb.d:ro
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\""]
+      interval: 3s
+      retries: 40
+    networks: [crobat]
+
+  app:
+    build: .
+    restart: on-failure
+    command: ["all"]
+    environment:
+      MYSQL_URL: "jdbc:mysql://mysql:3306/crobat?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+      MYSQL_USER: ${MYSQL_USER:-crobat}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-crobat-dev-only}
+      SECRETS_KEY: ${SECRETS_KEY:-ZGV2LW9ubHktc2VjcmV0cy1rZXktMzItYnl0ZXMhISE=}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-change-me}
+      EXECUTOR_WORKERS: ${EXECUTOR_WORKERS:-32}
+      EXECUTOR_POLL_MS: ${EXECUTOR_POLL_MS:-500}
+      ARCHIVE_SUCCEEDED_AFTER_MINUTES: ${ARCHIVE_SUCCEEDED_AFTER_MINUTES:-60}
+      ARCHIVE_DEAD_AFTER_HOURS: ${ARCHIVE_DEAD_AFTER_HOURS:-336}
+      HISTORY_TTL_DAYS: ${HISTORY_TTL_DAYS:-30}
+      # Dev only: lets the executor reach the demo echo container.
+      EXECUTOR_ALLOW_CIDRS: 172.28.0.100/32
+    ports: ["8080:8080", "8081:8081"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks: [crobat]
+
+  echo:
+    build: .
+    restart: on-failure
+    command: ["echo"]
+    environment:
+      ECHO_PORT: "80"
+    ports: ["8083:80"]
+    networks:
+      crobat:
+        ipv4_address: 172.28.0.100
+
+networks:
+  crobat:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  mysql_data:
