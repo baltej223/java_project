@@ -17,9 +17,16 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -142,4 +149,75 @@ class DbIntegrationTest {
         assertTrue(archived.getRequest().getHeaders().isEmpty());
         assertEquals("", archived.getRequest().getBody());
     }
+    @Test
+    void concurrentClaimsAreDisjoint() throws Exception {
+        tenant = "test-" + UUID.randomUUID();
+        for (int i = 0; i < 10; i++) {
+            createNowTask("parallel-" + i);
+        }
+        Instant now = Instant.now();
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<List<Job>> first = pool.submit(() -> {
+                start.await();
+                return jobs.claim("worker-a", 10, now.plusSeconds(60), now);
+            });
+            Future<List<Job>> second = pool.submit(() -> {
+                start.await();
+                return jobs.claim("worker-b", 10, now.plusSeconds(60), now);
+            });
+            start.countDown();
+
+            Set<String> seen = new HashSet<>();
+            int total = 0;
+            for (Job job : first.get(10, TimeUnit.SECONDS)) {
+                assertTrue(seen.add(job.getId()), "job claimed twice");
+                total++;
+            }
+            for (Job job : second.get(10, TimeUnit.SECONDS)) {
+                assertTrue(seen.add(job.getId()), "job claimed twice");
+                total++;
+            }
+            assertEquals(10, total);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void expiredLeaseIsReturnedToPending() throws Exception {
+        tenant = "test-" + UUID.randomUUID();
+        Task created = createNowTask("lease");
+        Job planned = jobs.listForTask(tenant, created.getId(), 10).get(0);
+
+        Instant now = Instant.now();
+        List<Job> claimed = jobs.claim("worker-a", 10, now.plusSeconds(60), now);
+        boolean ours = claimed.stream().anyMatch(j -> j.getId().equals(planned.getId()));
+        assertTrue(ours);
+
+        try (Connection connection = database.getConnection();
+             PreparedStatement ps = connection.prepareStatement(
+                     "UPDATE jobs SET lease_expires_at = ? WHERE id = ?")) {
+            ps.setTimestamp(1, java.sql.Timestamp.from(now.minusSeconds(10)));
+            ps.setString(2, planned.getId());
+            ps.executeUpdate();
+        }
+
+        assertTrue(jobs.releaseExpired(now, 100) >= 1);
+        Job released = jobs.get(tenant, planned.getId());
+        assertEquals(JobStatus.PENDING, released.getStatus());
+        assertEquals(1, released.getAttempt());
+    }
+
+    private Task createNowTask(String name) {
+        Task task = new Task();
+        task.setName(name);
+        task.setPriority(Priority.NORMAL);
+        task.setRequest(new RequestSpec("GET", "http://8.8.8.8/hook", Map.of(), ""));
+        task.setTimeoutMs(1000);
+        task.setRetry(new RetryPolicy(2, 500));
+        return taskService.create(tenant, "key-" + name + "-" + UUID.randomUUID(), task);
+    }
+
 }

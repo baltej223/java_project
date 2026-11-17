@@ -1478,8 +1478,9 @@ then run `java -jar ... all`.
 ### 15.2 Database integration test (MySQL required)
 
 `DbIntegrationTest` is skipped unless `RUN_DB_TESTS=1`. It uses a dedicated
-database, for example `crobat_test`, never the demo data. It covers the
-idempotent create, claim, fencing, archive, and secret-free history paths.
+database, for example `crobat_test`, never the demo data. Its three tests cover
+idempotent create, claim/fencing/archive, disjoint concurrent claims, lease
+expiry, and secret-free history.
 The smoke run against the full stack also checks flaky retry, DLQ, manual
 retry, one-shot scheduling, pause/resume/delete, tenant isolation, and SSRF.
 
@@ -1668,6 +1669,6 @@ If asked "what did you simplify?":
 ### Verified locally
 
 - `mvn test`: 37 unit tests pass; the MySQL integration test is skipped by default.
-- `DbIntegrationTest` against MySQL 8.4: pass.
+- `DbIntegrationTest` against MySQL 8.4: 3 tests pass.
 - Full stack: now, one-shot, flaky retry, DLQ, manual retry, archive/history,
   idempotent create, tenant isolation, secret non-exposure, SSRF block.
