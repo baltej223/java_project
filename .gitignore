@@ -6,3 +6,5 @@ target/
 *.iml
 .vscode/
 /crobat/
+frontend/node_modules/
+frontend/dist/
