@@ -11,17 +11,29 @@ broker. The queue is the MySQL `jobs` table, claimed with
 - Plain JDBC + MySQL 8
 - Jackson
 - cron-utils
+- React 18, TypeScript, Vite, Tailwind CSS, React Router
 - JUnit 5
 
 ## Quick start
 
 ```bash
 cp .env.example .env
+mvn package
 docker compose up -d --build
+```
 
+Open **http://localhost:8080** for the console.
+
+Create a tenant token and paste it into the console:
+
+```bash
 export JWT_SECRET=dev-only-jwt-secret-change-me
 export CROBAT_TOKEN=$(java -jar target/crobat-java-1.0.jar cli token acme)
+```
 
+The same token works with the CLI:
+
+```bash
 java -jar target/crobat-java-1.0.jar cli task create \
   -name hello -url http://echo/hello -priority critical
 
@@ -41,18 +53,61 @@ java -jar target/crobat-java-1.0.jar archiver
 java -jar target/crobat-java-1.0.jar echo
 ```
 
+The console is served by `all` mode on port 8080. The single-role `task-api`
+and `job-api` modes are API-only.
+
+## Web console
+
+The React app is in `frontend/` and is served by the Java `HttpServer`; there is
+no Node process in production.
+
+| Page | What it does |
+|---|---|
+| Overview | task counts, DLQ count, recent tasks |
+| Tasks | list, pause, resume, delete |
+| New task | create now / at / cron tasks with priority, timeout, retry, headers, body |
+| Task detail | task configuration and job history, manual retry for dead jobs |
+| DLQ | dead jobs and retry |
+
+The console stores the JWT in `localStorage`. The API is same-origin on port
+8080, so there is no CORS setup.
+
+Frontend development:
+
+```bash
+cd frontend
+npm install
+npm run dev          # http://localhost:5173, proxies /tasks, /jobs, /dlq to :8080
+```
+
+Production build for a locally run jar:
+
+```bash
+cd frontend
+npm run build
+cd ..
+WEB_ROOT=frontend/dist java -jar target/crobat-java-1.0.jar all
+```
+
+`docker compose build` runs `npm ci` and `npm run build` in a Node stage and
+copies `frontend/dist` into the runtime image.
+
 ## APIs
 
 All routes except `GET /healthz` require `Authorization: Bearer <HS256 JWT>`.
 The tenant is the token's `sub` claim.
 
+In `all` mode, port 8080 serves both the task routes and the job routes so the
+console can be same-origin. Port 8081 still exposes the job API separately.
+
 | Method and path | Port |
 |---|---|
 | `POST /tasks`, `GET /tasks`, `GET /tasks/{id}`, `PUT /tasks/{id}` | 8080 |
 | `POST /tasks/{id}/pause`, `POST /tasks/{id}/resume`, `DELETE /tasks/{id}` | 8080 |
-| `GET /jobs/{id}`, `POST /jobs/{id}/retry` | 8081 |
-| `GET /tasks/{id}/jobs?limit=n`, `GET /dlq` | 8081 |
+| `GET /jobs/{id}`, `POST /jobs/{id}/retry` | 8080 and 8081 |
+| `GET /tasks/{id}/jobs?limit=n`, `GET /dlq` | 8080 and 8081 |
 | `GET /healthz` | both |
+| `GET /`, `/assets/*` | 8080 (console) |
 
 Example task:
 
@@ -81,6 +136,10 @@ and `at` to run now.
 ```bash
 mvn test
 mvn package
+
+cd frontend
+npm install
+npm run build
 ```
 
 Unit tests need no database. The MySQL integration test is disabled by default:
@@ -114,5 +173,7 @@ for `crobat_test`.
   ranges; only ports 80 and 443; no proxy; no redirects. Java's built-in
   client cannot hook the dialer, so the check runs immediately before the
   request (documented residual DNS-rebinding risk).
+- **The console is static.** React Router pages are served from `index.html`;
+  the Java side only serves files and the existing JSON API.
 
 See `impl.doc` for the full design and `AGENTS.md` for the project rules.

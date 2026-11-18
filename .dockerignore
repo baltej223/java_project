@@ -2,4 +2,6 @@ target/
 .git/
 .env
 *.log
-crobat/
+/crobat/
+frontend/node_modules/
+frontend/dist/

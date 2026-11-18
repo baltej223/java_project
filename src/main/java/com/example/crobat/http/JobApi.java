@@ -7,8 +7,11 @@ public final class JobApi {
     }
 
     public static Router router(JobService service, String jwtSecret) {
-        Router router = new Router(jwtSecret);
+        return register(new Router(jwtSecret), service);
+    }
 
+    /** Adds the job routes to an existing router (used by the dashboard server). */
+    public static Router register(Router router, JobService service) {
         router.add("GET", "/jobs/{id}", 200, (tenant, params, body, exchange) ->
                 service.get(tenant, params.get("id")));
 

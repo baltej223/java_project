@@ -10,7 +10,9 @@ import com.example.crobat.db.SecretsCipher;
 import com.example.crobat.db.TaskStore;
 import com.example.crobat.http.EchoApi;
 import com.example.crobat.http.JobApi;
+import com.example.crobat.http.Router;
 import com.example.crobat.http.TaskApi;
+import com.example.crobat.http.WebUi;
 import com.example.crobat.services.ArchiverLoop;
 import com.example.crobat.services.ExecutorLoop;
 import com.example.crobat.services.JobService;
@@ -21,6 +23,7 @@ import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
 import java.net.InetSocketAddress;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -186,10 +189,14 @@ public final class Main {
 
         ExecutorService taskPool = Executors.newFixedThreadPool(16, daemonFactory("task-api"));
         ExecutorService jobPool = Executors.newFixedThreadPool(16, daemonFactory("job-api"));
+        // The dashboard and its API share one origin on the task-api port.
+        Router combined = TaskApi.router(taskService, jwt);
+        JobApi.register(combined, jobService);
         HttpServer taskServer = startServer(config.getTaskApiPort(),
-                TaskApi.router(taskService, jwt), taskPool);
+                new WebUi(combined, Path.of(config.getWebRoot())), taskPool);
         HttpServer jobServer = startServer(config.getJobApiPort(),
                 JobApi.router(jobService, jwt), jobPool);
+        LOG.info("web root=" + config.getWebRoot());
 
         List<Thread> threads = new ArrayList<>();
         startLoop(threads, "crobat-scheduler", new SchedulerLoop(

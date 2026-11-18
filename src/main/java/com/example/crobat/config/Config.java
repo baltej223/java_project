@@ -20,6 +20,7 @@ public class Config {
     private final long executorPollMs;
     private final String workerId;
     private final String executorAllowCidrs;
+    private final String webRoot;
     private final long reconcilerIntervalMs;
     private final int reconcilerBatch;
     private final long archiverIntervalMs;
@@ -47,6 +48,7 @@ public class Config {
         executorPollMs = longEnv("EXECUTOR_POLL_MS", 500);
         workerId = env("WORKER_ID", defaultWorkerId());
         executorAllowCidrs = env("EXECUTOR_ALLOW_CIDRS", "");
+        webRoot = env("WEB_ROOT", "frontend/dist");
         reconcilerIntervalMs = longEnv("RECONCILER_INTERVAL_MS", 5_000);
         reconcilerBatch = intEnv("RECONCILER_BATCH", 1000);
         archiverIntervalMs = longEnv("ARCHIVER_INTERVAL_MS", 10_000);
@@ -168,6 +170,10 @@ public class Config {
 
     public String getExecutorAllowCidrs() {
         return executorAllowCidrs;
+    }
+
+    public String getWebRoot() {
+        return webRoot;
     }
 
     public long getReconcilerIntervalMs() {

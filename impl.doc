@@ -87,6 +87,7 @@ Everything else in the Go design is preserved.
 | Language | **Java 17** | Widely available, LTS, enough for `HttpClient` and `java.time` |
 | Build | **Maven** | One `pom.xml`, one command, standard in courses |
 | HTTP server | **`com.sun.net.httpserver.HttpServer`** | In the JDK; no Spring |
+| Web console | **React 18 + TypeScript + Vite + Tailwind CSS + React Router** | Small SPA, static files served by the JDK server |
 | JSON | **Jackson** (`jackson-databind`, `jackson-datatype-jsr310`) | Explicit DTOs, easy date handling |
 | Database | **MySQL 8.0+**, plain JDBC + `mysql-connector-j` | Same database as the reference |
 | Cron | **`cron-utils`** | Correct next-run calculation with timezones |
@@ -218,6 +219,7 @@ src/main/java/com/example/crobat/
     TaskApi.java             task routes
     JobApi.java              job routes
     EchoApi.java             /fail, /flaky, /slow, default 200
+    WebUi.java               static files + React Router fallback
 
   call/
     HttpCaller.java          HttpClient wrapper, headers, timeout
@@ -225,6 +227,18 @@ src/main/java/com/example/crobat/
 
   cli/
     Cli.java                 token, task, job commands
+
+frontend/
+  package.json               React + TypeScript + Vite + Tailwind
+  vite.config.ts             dev server proxy for /tasks, /jobs, /dlq
+  tailwind.config.js
+  src/
+    main.tsx                 BrowserRouter
+    App.tsx                  routes
+    api.ts                   fetch wrapper with the bearer token
+    types.ts                 API types (snake_case)
+    components/              layout, token bar, badges
+    pages/                   overview, tasks, create, detail, DLQ
 ```
 
 Dependency direction:
@@ -1118,6 +1132,9 @@ Base64url without padding, signature = HMAC-SHA256.
 
 ### 9.3 Task API — port 8080
 
+In `all` mode this port also serves the job routes below and the React console,
+so the browser has one origin.
+
 | Method and path | Status | Body |
 |---|---|---|
 | `POST /tasks` | 201 | task input; optional `Idempotency-Key` header |
@@ -1405,16 +1422,25 @@ Exit code 0 on success, 1 on any error or HTTP status ≥ 400.
 Multi-stage:
 
 ```dockerfile
+FROM node:22-alpine AS web
+WORKDIR /web
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 FROM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /app
 COPY pom.xml .
 RUN mvn -q dependency:go-offline
 COPY src ./src
-RUN mvn -q package
+RUN mvn -q package -DskipTests
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app
 COPY --from=build /app/target/crobat-java-1.0.jar app.jar
+COPY --from=web /web/dist ./web
+ENV WEB_ROOT=/app/web
 ENTRYPOINT ["java", "-jar", "app.jar"]
 CMD ["all"]
 ```
@@ -1424,7 +1450,7 @@ CMD ["all"]
 Services:
 
 - `mysql` — image `mysql:8.4`, mounts `deploy/mysql/schema.sql`, health check;
-- `app` — builds this repo, runs `all`, ports 8080 and 8081;
+- `app` — builds the JAR and the React bundle, runs `all`, ports 8080 and 8081;
 - `echo` — same image, command `["echo"]`, `ECHO_PORT=80`, host port 8083.
 
 Environment for `app`: `MYSQL_URL`, `MYSQL_USER`, `MYSQL_PASSWORD`,
@@ -1669,6 +1695,66 @@ If asked "what did you simplify?":
 ### Verified locally
 
 - `mvn test`: 37 unit tests pass; the MySQL integration test is skipped by default.
+- `cd frontend && npm run build`: TypeScript check and Vite production build pass.
 - `DbIntegrationTest` against MySQL 8.4: 3 tests pass.
 - Full stack: now, one-shot, flaky retry, DLQ, manual retry, archive/history,
   idempotent create, tenant isolation, secret non-exposure, SSRF block.
+- Browser: overview, task list, create form, task detail with execution
+  history, DLQ, token bar, and refresh on a React Router path.
+
+
+---
+
+## 22. Web console
+
+The console is a small React SPA in `frontend/`. It is not a second server:
+the Java `all` mode serves the built files and the JSON API from the same
+origin on port 8080.
+
+### 22.1 Pages
+
+| Route | Page |
+|---|---|
+| `/` | task counts, DLQ count, recent tasks |
+| `/tasks` | task list, pause/resume/delete |
+| `/tasks/new` | create now / at / cron, priority, timeout, retry, headers, body |
+| `/tasks/:id` | task configuration, execution history, dead-job retry |
+| `/dlq` | dead jobs, manual retry |
+
+The token bar stores the JWT in `localStorage`. Every `fetch` adds
+`Authorization: Bearer <token>`. The token is never put in a URL.
+
+### 22.2 Serving
+
+`WebUi` wraps the combined `Router`:
+
+- paths under `/tasks`, `/jobs`, `/dlq`, and `/healthz` go to the JSON API;
+- `/` and `/assets/*` are read from `WEB_ROOT` (default `frontend/dist`);
+- a missing path without a file extension returns `index.html`, so a browser
+  refresh on `/tasks/123` works with React Router.
+
+`Main` in `all` mode registers both `TaskApi` and `JobApi` on one router, so the
+console has no CORS and no proxy in production. The separate `job-api` on 8081
+still exists for the CLI and other clients.
+
+`WEB_ROOT` can point at `frontend/dist` for a local jar. The Dockerfile builds
+the bundle in a Node stage and sets `WEB_ROOT=/app/web`.
+
+### 22.3 Development
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Vite runs on 5173 and proxies `/tasks`, `/jobs`, `/dlq`, and `/healthz` to
+`http://localhost:8080`. Production uses `npm run build` and the Java server.
+
+### 22.4 Deliberate limits
+
+- The JWT is in `localStorage`; this is a local course demo, not a hardened
+  multi-user deployment.
+- There is no polling; pages load on navigation or after an action. Refresh to
+  see new job results.
+- No component library or state library. Tailwind classes and React hooks only.

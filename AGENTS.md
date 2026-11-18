@@ -13,7 +13,8 @@ This file tells any coding agent (or teammate) how to work in this repository.
 ## Current phase
 
 The v1 implementation is complete: domain, MySQL stores, six service roles,
-REST APIs, CLI, Docker stack, and tests. Continue with small, tested changes.
+REST APIs, CLI, React console, Docker stack, and tests. Continue with small,
+tested changes.
 
 ## Product in one paragraph
 
@@ -52,6 +53,7 @@ table; there is no Kafka, RabbitMQ, or Redis.
 | Language | Java 17 |
 | Build | Maven, one module |
 | Web | `com.sun.net.httpserver.HttpServer` from the JDK |
+| Console | React 18 + TypeScript + Vite + Tailwind CSS + React Router |
 | JSON | Jackson, **snake_case** property names |
 | Database | Plain JDBC + MySQL Connector/J |
 | Cron parsing | `cron-utils` |
@@ -61,7 +63,7 @@ table; there is no Kafka, RabbitMQ, or Redis.
 
 **Do not add:** Spring/Spring Boot, Hibernate/JPA, Lombok, records, sealed
 classes, virtual threads, reactive APIs, Kafka, RabbitMQ, Redis, Cassandra,
-Kubernetes, a frontend.
+Kubernetes, another UI framework. The React console in `frontend/` is the UI.
 
 Use ordinary Java that a second-year student can read: explicit classes,
 fields, constructors, getters/setters, `for` loops over streams, named
@@ -74,9 +76,17 @@ mvn test                 # unit tests, no database
 mvn package              # target/crobat-java-1.0.jar
 java -jar target/crobat-java-1.0.jar all
 
+cd frontend
+npm install
+npm run build            # frontend/dist, served when WEB_ROOT points at it
+npm run dev              # http://localhost:5173, proxies to :8080
+
 docker compose up -d --build
 docker compose logs -f app echo
 ```
+
+The console is served by `all` mode on port 8080. Local jar runs need
+`WEB_ROOT=frontend/dist` if the frontend was built outside Docker.
 
 The app also runs one role at a time: `task-api`, `job-api`, `scheduler`,
 `executor`, `reconciler`, `archiver`, `echo`.
@@ -104,10 +114,14 @@ src/main/java/com/example/crobat/
     domain/        enums, Task, Job, Result, cron, backoff, fair pick
     db/            Database, SecretsCipher, TaskStore, JobStore, HistoryStore
     services/      TaskService, JobService, four background loops
-    http/          Json, Jwt, Router, TaskApi, JobApi, EchoApi
+    http/          Json, Jwt, Router, TaskApi, JobApi, EchoApi, WebUi
     call/          HttpCaller, SsrfGuard, Cidr
     cli/           Cli
 src/test/java/com/example/crobat/...
+frontend/          React + TypeScript + Tailwind + React Router
+  src/pages/       overview, tasks, create, detail, DLQ
+  src/components/  layout, token bar, badges
+  src/api.ts       fetch wrapper with the bearer token
 ```
 
 ## Coding rules
@@ -127,6 +141,11 @@ src/test/java/com/example/crobat/...
 - Use `MessageDigest.isEqual` for signature comparison.
 - Keep `domain` free of JDBC, HTTP, and config code.
 - Add a comment only where the reason is not obvious (locks, fencing, leases).
+- Frontend: plain function components, no state library, no component library.
+  Use Tailwind utility classes and `fetch`. Keep the console same-origin on
+  port 8080; do not add CORS.
+- Do not put secrets in frontend code, logs, or URLs. The JWT lives in
+  `localStorage` only because this is a local course demo.
 
 ## Database invariants
 
@@ -160,4 +179,5 @@ A change is done only when:
 - secrets are not exposed in JSON or logs;
 - a failed HTTP call leaves the job in `pending` or `dead`, never lost;
 - `mvn test` passes;
+- `cd frontend && npm run build` passes when the console changed;
 - `impl.doc` is updated if behavior or structure changed.
