@@ -1,8 +1,8 @@
 import type { CreateTaskInput, Job, LoginResponse, Task } from './types'
 
-export const TOKEN_KEY = 'crobat_token'
-const TENANT_KEY = 'crobat_tenant'
-const USER_KEY = 'crobat_user'
+export const TOKEN_KEY = 'chroner_token'
+const TENANT_KEY = 'chroner_tenant'
+const USER_KEY = 'chroner_user'
 
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) ?? ''

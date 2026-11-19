@@ -5,9 +5,9 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.example</groupId>
-  <artifactId>crobat-java</artifactId>
+  <artifactId>chroner</artifactId>
   <version>1.0</version>
-  <name>Crobat Java</name>
+  <name>Chroner</name>
   <description>Cron as a service, implemented with plain Java and MySQL</description>
 
   <properties>
@@ -48,7 +48,7 @@
   </dependencies>
 
   <build>
-    <finalName>crobat-java-1.0</finalName>
+    <finalName>chroner-1.0</finalName>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -74,7 +74,7 @@
               <createDependencyReducedPom>false</createDependencyReducedPom>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                  <mainClass>com.example.crobat.Main</mainClass>
+                  <mainClass>com.example.chroner.Main</mainClass>
                 </transformer>
               </transformers>
               <filters>

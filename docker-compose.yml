@@ -4,9 +4,9 @@ services:
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-dev-only}
-      MYSQL_DATABASE: crobat
-      MYSQL_USER: ${MYSQL_USER:-crobat}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-crobat-dev-only}
+      MYSQL_DATABASE: chroner
+      MYSQL_USER: ${MYSQL_USER:-chroner}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-chroner-dev-only}
     ports: ["3306:3306"]
     volumes:
       - ./deploy/mysql:/docker-entrypoint-initdb.d:ro
@@ -15,16 +15,16 @@ services:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\""]
       interval: 3s
       retries: 40
-    networks: [crobat]
+    networks: [chroner]
 
   app:
     build: .
     restart: on-failure
     command: ["all"]
     environment:
-      MYSQL_URL: "jdbc:mysql://mysql:3306/crobat?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
-      MYSQL_USER: ${MYSQL_USER:-crobat}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-crobat-dev-only}
+      MYSQL_URL: "jdbc:mysql://mysql:3306/chroner?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+      MYSQL_USER: ${MYSQL_USER:-chroner}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-chroner-dev-only}
       SECRETS_KEY: ${SECRETS_KEY:-ZGV2LW9ubHktc2VjcmV0cy1rZXktMzItYnl0ZXMhISE=}
       JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-change-me}
       AUTH_TOKEN_TTL_SECONDS: ${AUTH_TOKEN_TTL_SECONDS:-86400}
@@ -39,7 +39,7 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-    networks: [crobat]
+    networks: [chroner]
 
   echo:
     build: .
@@ -49,11 +49,11 @@ services:
       ECHO_PORT: "80"
     ports: ["8083:80"]
     networks:
-      crobat:
+      chroner:
         ipv4_address: 172.28.0.100
 
 networks:
-  crobat:
+  chroner:
     ipam:
       config:
         - subnet: 172.28.0.0/16

@@ -1,13 +1,13 @@
-# AGENTS.md — Java Crobat
+# AGENTS.md — Java Chroner
 
 This file tells any coding agent (or teammate) how to work in this repository.
 
 ## What this repository is
 
-- A Java implementation of **Crobat**, a multi-tenant cron/HTTP job scheduler.
+- A Java implementation of **Chroner**, a multi-tenant cron/HTTP job scheduler.
 - `impl.doc` is the design document. `README.md` is the quick start.
-- `crobat/` is the original **Go** implementation (reference only, ignored by
-  git). Do not edit it and do not import it.
+- The original Go implementation is reference only and ignored by git.
+  Do not edit it and do not import it.
 - The Java project is a single Maven module in this directory.
 
 ## Current phase
@@ -74,8 +74,8 @@ exceptions, `java.time.Instant`, one public class per file, small methods.
 
 ```bash
 mvn test                 # unit tests, no database
-mvn package              # target/crobat-java-1.0.jar
-java -jar target/crobat-java-1.0.jar all
+mvn package              # target/chroner-1.0.jar
+java -jar target/chroner-1.0.jar all
 
 cd frontend
 npm install
@@ -99,8 +99,8 @@ MySQL integration test:
 
 ```bash
 RUN_DB_TESTS=1 \
-MYSQL_URL='jdbc:mysql://localhost:3306/crobat_test?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true' \
-MYSQL_USER=crobat MYSQL_PASSWORD=crobat-dev-only \
+MYSQL_URL='jdbc:mysql://localhost:3306/chroner_test?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true' \
+MYSQL_USER=chroner MYSQL_PASSWORD=chroner-dev-only \
 SECRETS_KEY='ZGV2LW9ubHktc2VjcmV0cy1rZXktMzItYnl0ZXMhISE=' \
 mvn test
 ```
@@ -112,7 +112,7 @@ pom.xml
 Dockerfile
 docker-compose.yml
 deploy/mysql/schema.sql
-src/main/java/com/example/crobat/
+src/main/java/com/example/chroner/
     Main.java
     config/Config.java
     domain/        enums, Task, Job, Result, cron, backoff, fair pick
@@ -122,7 +122,7 @@ src/main/java/com/example/crobat/
     security/      Jwt (HS256 sign/verify)
     call/          HttpCaller, SsrfGuard, Cidr
     cli/           Cli
-src/test/java/com/example/crobat/...
+src/test/java/com/example/chroner/...
 frontend/          React + TypeScript + Tailwind + React Router
   src/pages/       login, overview, tasks, create/edit, detail, DLQ
   src/components/  layout, badges
@@ -174,8 +174,8 @@ Remote: `git@github.com:baltej223/java_project.git`
 
 - Use plain `git`; do not use `gh`.
 - Commit in real time. Never backdate a commit and do not use `timegit`.
-- Keep `crobat/` ignored; it is the reference implementation, not part of the
-  Java deliverable.
+- Keep the reference implementation ignored; it is not part of the Java
+  deliverable.
 
 ## Definition of done
 

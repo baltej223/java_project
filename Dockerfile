@@ -14,7 +14,7 @@ RUN mvn -q -B package -DskipTests
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app
-COPY --from=build /app/target/crobat-java-1.0.jar app.jar
+COPY --from=build /app/target/chroner-1.0.jar app.jar
 COPY --from=web /web/dist ./web
 ENV WEB_ROOT=/app/web
 ENTRYPOINT ["java", "-jar", "app.jar"]

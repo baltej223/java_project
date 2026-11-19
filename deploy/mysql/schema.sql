@@ -1,8 +1,8 @@
--- Crobat Java schema. All times are UTC and use DATETIME(3).
+-- Chroner Java schema. All times are UTC and use DATETIME(3).
 -- Loaded by the MySQL container on first start.
 
-CREATE DATABASE IF NOT EXISTS crobat;
-USE crobat;
+CREATE DATABASE IF NOT EXISTS chroner;
+USE chroner;
 
 CREATE TABLE IF NOT EXISTS tasks (
   id              CHAR(36)     NOT NULL PRIMARY KEY,

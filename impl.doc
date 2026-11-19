@@ -1,4 +1,4 @@
-# Java Crobat — Implementation Document
+# Java Chroner — Implementation Document
 
 > Plain-Markdown implementation plan. The file is named `impl.doc` because that is
 > what the project brief asks for; it is not a Word binary. Read it with any text
@@ -10,9 +10,9 @@
 
 ## 1. What we are building
 
-A Java rewrite of the Go project in `crobat/`.
+A Java rewrite of the original Go reference implementation.
 
-Crobat is **cron as a service**. A tenant creates a task that calls an HTTP
+Chroner is **cron as a service**. A tenant creates a task that calls an HTTP
 endpoint:
 
 - **now**,
@@ -130,7 +130,7 @@ Suggested `pom.xml` dependencies:
 ```
 
 Compiler settings: `<release>17</release>`. Shade plugin main class:
-`com.example.crobat.Main`.
+`com.example.chroner.Main`.
 
 ---
 
@@ -177,7 +177,7 @@ pom.xml
 Dockerfile
 docker-compose.yml
 deploy/mysql/schema.sql
-src/main/java/com/example/crobat/
+src/main/java/com/example/chroner/
   Main.java
 
   config/
@@ -588,7 +588,7 @@ History **never stores**:
 - JDBC URL must use UTC, for example:
 
 ```text
-jdbc:mysql://localhost:3306/crobat
+jdbc:mysql://localhost:3306/chroner
   ?useSSL=false
   &allowPublicKeyRetrieval=true
   &connectionTimeZone=UTC
@@ -1265,7 +1265,7 @@ For each job:
    - `Idempotency-Key: <job id>`
    - `X-Scheduled-At: <ISO-8601 UTC>`
    - `X-Attempt: <attempt>`
-   - `User-Agent: crobat-java-executor`
+   - `User-Agent: chroner-executor`
 5. Set a per-request timeout from `job.timeoutMs`.
 6. Send with `BodyHandlers.ofInputStream()` or `ofByteArray()`.
 7. Read at most 1024 bytes of the response body.
@@ -1342,9 +1342,9 @@ Compose and the shell set the variables.
 
 | Variable | Default | Used by |
 |---|---|---|
-| `MYSQL_URL` | `jdbc:mysql://localhost:3306/crobat?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true` | all DB modes |
-| `MYSQL_USER` | `crobat` | all DB modes |
-| `MYSQL_PASSWORD` | `crobat` | all DB modes |
+| `MYSQL_URL` | `jdbc:mysql://localhost:3306/chroner?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true` | all DB modes |
+| `MYSQL_USER` | `chroner` | all DB modes |
+| `MYSQL_PASSWORD` | `chroner` | all DB modes |
 | `SECRETS_KEY` | required; base64 of 32 bytes | all except echo/cli |
 | `JWT_SECRET` | required for APIs and `token` | task-api, job-api, cli |
 | `TASK_API_PORT` | `8080` | task-api |
@@ -1365,9 +1365,9 @@ Compose and the shell set the variables.
 | `ARCHIVE_SUCCEEDED_AFTER_MINUTES` | `60` | archiver |
 | `ARCHIVE_DEAD_AFTER_HOURS` | `336` | archiver |
 | `HISTORY_TTL_DAYS` | `30` | archiver |
-| `CROBAT_TOKEN` | — | CLI |
-| `CROBAT_TASK_API` | `http://localhost:8080` | CLI |
-| `CROBAT_JOB_API` | `http://localhost:8081` | CLI |
+| `CHRONER_TOKEN` | — | CLI |
+| `CHRONER_TASK_API` | `http://localhost:8080` | CLI |
+| `CHRONER_JOB_API` | `http://localhost:8081` | CLI |
 
 `Config` should use typed getters:
 
@@ -1388,7 +1388,7 @@ A malformed number must fail at startup with a message naming the variable.
   (for example 16 threads per API).
 - Use one dedicated thread per scheduler/reconciler/archiver loop. Use a
   `ScheduledThreadPoolExecutor` for per-job timers.
-- Name threads (`crobat-scheduler`, `crobat-executor`, `crobat-task-api-...`)
+- Name threads (`chroner-scheduler`, `chroner-executor`, `chroner-task-api-...`)
   so logs are readable.
 - Every loop catches `Exception`, logs it, and continues with the next tick.
   A failed database call must not stop the service.
@@ -1477,7 +1477,7 @@ RUN mvn -q package -DskipTests
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app
-COPY --from=build /app/target/crobat-java-1.0.jar app.jar
+COPY --from=build /app/target/chroner-1.0.jar app.jar
 COPY --from=web /web/dist ./web
 ENV WEB_ROOT=/app/web
 ENTRYPOINT ["java", "-jar", "app.jar"]
@@ -1510,13 +1510,13 @@ Do not disable SSRF globally.
 docker compose up -d --build
 
 export JWT_SECRET=dev-only-jwt-secret-change-me
-export CROBAT_TOKEN=$(java -jar target/crobat-java-1.0.jar cli token acme)
+export CHRONER_TOKEN=$(java -jar target/chroner-1.0.jar cli token acme)
 
-java -jar target/crobat-java-1.0.jar cli task create \
+java -jar target/chroner-1.0.jar cli task create \
   -name hello -url http://echo/hello -priority critical
 
-java -jar target/crobat-java-1.0.jar cli task list
-java -jar target/crobat-java-1.0.jar cli job dlq
+java -jar target/chroner-1.0.jar cli task list
+java -jar target/chroner-1.0.jar cli job dlq
 ```
 
 For local (non-Docker) runs, start MySQL with the schema, export
@@ -1543,7 +1543,7 @@ then run `java -jar ... all`.
 ### 15.2 Database integration test (MySQL required)
 
 `DbIntegrationTest` is skipped unless `RUN_DB_TESTS=1`. It uses a dedicated
-database, for example `crobat_test`, never the demo data. Its three tests cover
+database, for example `chroner_test`, never the demo data. Its three tests cover
 idempotent create, claim/fencing/archive, disjoint concurrent claims, lease
 expiry, and secret-free history.
 The smoke run against the full stack also checks flaky retry, DLQ, manual
@@ -1654,7 +1654,7 @@ The project is complete when all of these are true:
 | `internal/adapter/cassandra` | `db/HistoryStore` (MySQL table) |
 | `internal/adapter/caller` | `call/HttpCaller`, `call/SsrfGuard` |
 | `internal/adapter/httpapi` | `http/Router`, `TaskApi`, `JobApi`, `Jwt` |
-| `cmd/crobat/main.go` | `Main`, `Cli`, `Config` |
+| Go reference main | `Main`, `Cli`, `Config` |
 | `deploy/mysql/schema.sql` | same file, plus `job_history` |
 | `docker-compose.yml` | same idea, fewer services |
 
@@ -1699,7 +1699,7 @@ If the professor asks "why no queue?":
 If asked "why not just use a scheduler library?":
 
 > The library tells you when to run. It does not give you durable jobs,
-> retries, a DLQ, leases, tenant isolation, or a history. Crobat's job is the
+> retries, a DLQ, leases, tenant isolation, or a history. Chroner's job is the
 > durable execution, not the cron parser.
 
 If asked "what happens if an executor dies?":

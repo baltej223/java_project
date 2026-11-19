@@ -30,7 +30,7 @@ export function Layout() {
       <header className="border-b border-slate-800 bg-slate-900 text-white">
         <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-lg font-semibold tracking-tight">Crobat</p>
+            <p className="text-lg font-semibold tracking-tight">Chroner</p>
             <p className="text-xs text-slate-400">Cron and HTTP job console</p>
           </div>
           <div className="flex flex-wrap items-center gap-3">

@@ -1,0 +1,106 @@
+package com.example.chroner.http;
+
+import com.example.chroner.domain.Priority;
+import com.example.chroner.domain.RequestSpec;
+import com.example.chroner.domain.RetryPolicy;
+import com.example.chroner.domain.Task;
+
+import java.time.Instant;
+
+/** The JSON body of POST/PUT /tasks. */
+public class TaskInput {
+    private String name;
+    private String cron;
+    private Instant at;
+    private String timezone = "UTC";
+    private Priority priority = Priority.NORMAL;
+    private RequestSpec request = new RequestSpec();
+    private int timeoutMs;
+    private RetryPolicy retry = new RetryPolicy();
+    private boolean preserveSecrets;
+
+    public Task toTask() {
+        Task task = new Task();
+        task.setName(name);
+        task.setCron(cron == null ? "" : cron);
+        task.setAt(at);
+        task.setTimezone(timezone);
+        task.setPriority(priority);
+        task.setRequest(request);
+        task.setTimeoutMs(timeoutMs);
+        task.setRetry(retry);
+        return task;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getCron() {
+        return cron;
+    }
+
+    public void setCron(String cron) {
+        this.cron = cron;
+    }
+
+    public Instant getAt() {
+        return at;
+    }
+
+    public void setAt(Instant at) {
+        this.at = at;
+    }
+
+    public String getTimezone() {
+        return timezone;
+    }
+
+    public void setTimezone(String timezone) {
+        this.timezone = timezone;
+    }
+
+    public Priority getPriority() {
+        return priority;
+    }
+
+    public void setPriority(Priority priority) {
+        this.priority = priority;
+    }
+
+    public RequestSpec getRequest() {
+        return request;
+    }
+
+    public void setRequest(RequestSpec request) {
+        this.request = request;
+    }
+
+    public int getTimeoutMs() {
+        return timeoutMs;
+    }
+
+    public void setTimeoutMs(int timeoutMs) {
+        this.timeoutMs = timeoutMs;
+    }
+
+    public RetryPolicy getRetry() {
+        return retry;
+    }
+
+    public boolean isPreserveSecrets() {
+        return preserveSecrets;
+    }
+
+    public void setPreserveSecrets(boolean preserveSecrets) {
+        this.preserveSecrets = preserveSecrets;
+    }
+
+    public void setRetry(RetryPolicy retry) {
+        this.retry = retry;
+    }
+}
