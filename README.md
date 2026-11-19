@@ -22,16 +22,23 @@ mvn package
 docker compose up -d --build
 ```
 
-Open **http://localhost:8080** for the console.
+Open **http://localhost:8080** for the console and sign in:
 
-Create a tenant token and paste it into the console:
+```text
+Tenant:   acme
+Username: admin
+Password: admin123
+```
+
+The demo user is seeded by `deploy/mysql/schema.sql`. Change it before sharing
+a deployment.
+
+The CLI still uses a token directly:
 
 ```bash
 export JWT_SECRET=dev-only-jwt-secret-change-me
 export CROBAT_TOKEN=$(java -jar target/crobat-java-1.0.jar cli token acme)
 ```
-
-The same token works with the CLI:
 
 ```bash
 java -jar target/crobat-java-1.0.jar cli task create \
@@ -63,14 +70,22 @@ no Node process in production.
 
 | Page | What it does |
 |---|---|
+| `/login` | tenant + username + password login |
 | Overview | task counts, DLQ count, recent tasks |
-| Tasks | list, pause, resume, delete |
+| Tasks | list, edit, pause, resume, delete |
 | New task | create now / at / cron tasks with priority, timeout, retry, headers, body |
+| Edit task | change the configuration; existing jobs keep their plan |
 | Task detail | task configuration and job history, manual retry for dead jobs |
 | DLQ | dead jobs and retry |
 
-The console stores the JWT in `localStorage`. The API is same-origin on port
-8080, so there is no CORS setup.
+The login endpoint returns the same HS256 JWT used by the CLI, and the browser
+stores it in `localStorage`. Protected pages redirect to `/login` when the token
+is missing or expired. The console and API are same-origin on port 8080, so
+there is no CORS setup.
+
+Editing never returns stored headers or body. The edit form keeps the existing
+encrypted secrets unless you uncheck **Keep the existing encrypted headers and
+body**.
 
 Frontend development:
 
@@ -94,8 +109,8 @@ copies `frontend/dist` into the runtime image.
 
 ## APIs
 
-All routes except `GET /healthz` require `Authorization: Bearer <HS256 JWT>`.
-The tenant is the token's `sub` claim.
+All routes except `GET /healthz` and `POST /auth/login` require
+`Authorization: Bearer <HS256 JWT>`. The tenant is the token's `sub` claim.
 
 In `all` mode, port 8080 serves both the task routes and the job routes so the
 console can be same-origin. Port 8081 still exposes the job API separately.
@@ -104,6 +119,7 @@ console can be same-origin. Port 8081 still exposes the job API separately.
 |---|---|
 | `POST /tasks`, `GET /tasks`, `GET /tasks/{id}`, `PUT /tasks/{id}` | 8080 |
 | `POST /tasks/{id}/pause`, `POST /tasks/{id}/resume`, `DELETE /tasks/{id}` | 8080 |
+| `POST /auth/login` | 8080 (public) |
 | `GET /jobs/{id}`, `POST /jobs/{id}/retry` | 8080 and 8081 |
 | `GET /tasks/{id}/jobs?limit=n`, `GET /dlq` | 8080 and 8081 |
 | `GET /healthz` | both |
@@ -167,6 +183,8 @@ for `crobat_test`.
   is already planned.
 - **Secrets are AES-256-GCM at rest.** Headers and bodies are never returned by
   the API, logged, or archived.
+- **Login users are hashed.** Passwords use PBKDF2-HMAC-SHA256; the JWT is the
+  same HS256 token the CLI can mint. The demo credentials are for local use.
 - **History is a MySQL table** (`job_history`) instead of Cassandra. The hot
   row is deleted only after history is written.
 - **SSRF guard** blocks loopback, private, link-local, CGNAT, and special

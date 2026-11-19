@@ -92,6 +92,7 @@ Everything else in the Go design is preserved.
 | Database | **MySQL 8.0+**, plain JDBC + `mysql-connector-j` | Same database as the reference |
 | Cron | **`cron-utils`** | Correct next-run calculation with timezones |
 | JWT | Hand-written HS256 utility (JDK `Mac` + Base64) | About 80 lines; avoids a security dependency |
+| Login | `users` table + PBKDF2-HMAC-SHA256 (`javax.crypto`) | No plaintext passwords; one small service |
 | Tests | **JUnit 5** | Standard |
 | Logging | `java.util.logging` | No extra dependency |
 | Packaging | Maven Shade plugin → runnable JAR | `java -jar` works |
@@ -199,6 +200,7 @@ src/main/java/com/example/crobat/
 
   db/
     Database.java            JDBC connection helper
+    UserStore.java           users table lookup
     SecretsCipher.java       AES-256-GCM encrypt/decrypt
     TaskStore.java           tasks table + scheduler transaction
     JobStore.java            jobs table: claim, result, lease, archive, DLQ
@@ -206,16 +208,21 @@ src/main/java/com/example/crobat/
 
   services/
     TaskService.java         create/get/list/update/pause/resume/delete
+    AuthService.java         login -> JWT
+    PasswordHasher.java      PBKDF2 hash/verify
     JobService.java          status/history/DLQ/manual retry
     SchedulerLoop.java       due tasks -> pending jobs
     ExecutorLoop.java        claim -> timer -> HTTP -> save
     ReconcilerLoop.java      expired leases -> pending/dead
     ArchiverLoop.java        hot jobs -> history, then delete
 
+  security/
+    Jwt.java                 sign/verify HS256
+
   http/
     Json.java                shared ObjectMapper
-    Jwt.java                 sign/verify HS256
     Router.java              method + path routing + auth + errors
+    AuthApi.java             POST /auth/login
     TaskApi.java             task routes
     JobApi.java              job routes
     EchoApi.java             /fail, /flaky, /slow, default 200
@@ -237,8 +244,8 @@ frontend/
     App.tsx                  routes
     api.ts                   fetch wrapper with the bearer token
     types.ts                 API types (snake_case)
-    components/              layout, token bar, badges
-    pages/                   overview, tasks, create, detail, DLQ
+    components/              layout, badges
+    pages/                   login, overview, tasks, create/edit, detail, DLQ
 ```
 
 Dependency direction:
@@ -533,6 +540,14 @@ This is the Java version's replacement for Cassandra. It is append-only until
 the 30-day cleanup.
 
 ```sql
+CREATE TABLE IF NOT EXISTS users (
+  tenant_id     VARCHAR(64) NOT NULL,
+  username      VARCHAR(64) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  created_at    DATETIME(3) NOT NULL,
+  PRIMARY KEY (tenant_id, username)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS job_history (
   id           CHAR(36)     NOT NULL PRIMARY KEY,
   tenant_id    VARCHAR(64)  NOT NULL,
@@ -1130,6 +1145,29 @@ Base64url without padding, signature = HMAC-SHA256.
 - Always set `Content-Type: application/json`.
 - `DELETE /tasks/{id}` returns 204 with no body.
 
+### 9.2a Login API
+
+`POST /auth/login` is public:
+
+```json
+{"tenant": "acme", "username": "admin", "password": "admin123"}
+```
+
+It returns the same HS256 JWT the CLI mints:
+
+```json
+{
+  "token": "eyJ...",
+  "tenant_id": "acme",
+  "username": "admin",
+  "expires_at": "2026-11-20T06:45:02Z"
+}
+```
+
+Wrong credentials return 401 with a generic message. Passwords are PBKDF2HMAC-SHA256
+with a per-user salt; the demo seed is in `deploy/mysql/schema.sql`. The token
+TTL is `AUTH_TOKEN_TTL_SECONDS` (default 86400).
+
 ### 9.3 Task API — port 8080
 
 In `all` mode this port also serves the job routes below and the React console,
@@ -1312,6 +1350,7 @@ Compose and the shell set the variables.
 | `TASK_API_PORT` | `8080` | task-api |
 | `JOB_API_PORT` | `8081` | job-api |
 | `ECHO_PORT` | `8083` (Compose: `80`) | echo |
+| `AUTH_TOKEN_TTL_SECONDS` | `86400` | login |
 | `SCHEDULER_INTERVAL_MS` | `5000` | scheduler |
 | `SCHEDULER_LOOKAHEAD_MS` | `30000` | scheduler |
 | `SCHEDULER_BATCH` | `500` | scheduler |
@@ -1694,13 +1733,14 @@ If asked "what did you simplify?":
 
 ### Verified locally
 
-- `mvn test`: 37 unit tests pass; the MySQL integration test is skipped by default.
+- `mvn test`: 39 unit tests pass; the MySQL integration test is skipped by default.
 - `cd frontend && npm run build`: TypeScript check and Vite production build pass.
 - `DbIntegrationTest` against MySQL 8.4: 3 tests pass.
 - Full stack: now, one-shot, flaky retry, DLQ, manual retry, archive/history,
   idempotent create, tenant isolation, secret non-exposure, SSRF block.
-- Browser: overview, task list, create form, task detail with execution
-  history, DLQ, token bar, and refresh on a React Router path.
+- Browser: login with `acme`/`admin`/`admin123`, protected redirect, overview,
+  task list, create form, edit form, task detail with execution history, DLQ,
+  logout, and refresh on a React Router path.
 
 
 ---
@@ -1715,27 +1755,31 @@ origin on port 8080.
 
 | Route | Page |
 |---|---|
+| `/login` | tenant + username + password login |
 | `/` | task counts, DLQ count, recent tasks |
-| `/tasks` | task list, pause/resume/delete |
+| `/tasks` | task list, edit, pause/resume/delete |
 | `/tasks/new` | create now / at / cron, priority, timeout, retry, headers, body |
+| `/tasks/:id/edit` | edit configuration, preserve or replace secrets |
 | `/tasks/:id` | task configuration, execution history, dead-job retry |
 | `/dlq` | dead jobs, manual retry |
 
-The token bar stores the JWT in `localStorage`. Every `fetch` adds
-`Authorization: Bearer <token>`. The token is never put in a URL.
+The login page calls `POST /auth/login`. The returned JWT goes into
+`localStorage`; every `fetch` adds `Authorization: Bearer <token>`. Protected
+routes redirect to `/login` when the token is missing or expired. The token is
+never put in a URL.
 
 ### 22.2 Serving
 
 `WebUi` wraps the combined `Router`:
 
-- paths under `/tasks`, `/jobs`, `/dlq`, and `/healthz` go to the JSON API;
+- paths under `/tasks`, `/jobs`, `/dlq`, `/auth`, and `/healthz` go to the JSON API;
 - `/` and `/assets/*` are read from `WEB_ROOT` (default `frontend/dist`);
 - a missing path without a file extension returns `index.html`, so a browser
   refresh on `/tasks/123` works with React Router.
 
-`Main` in `all` mode registers both `TaskApi` and `JobApi` on one router, so the
-console has no CORS and no proxy in production. The separate `job-api` on 8081
-still exists for the CLI and other clients.
+`Main` in `all` mode registers `TaskApi`, `JobApi`, and the public
+`AuthApi` on one router, so the console has no CORS and no proxy in production.
+The separate `job-api` on 8081 still exists for the CLI and other clients.
 
 `WEB_ROOT` can point at `frontend/dist` for a local jar. The Dockerfile builds
 the bundle in a Node stage and sets `WEB_ROOT=/app/web`.
@@ -1748,10 +1792,20 @@ npm install
 npm run dev
 ```
 
-Vite runs on 5173 and proxies `/tasks`, `/jobs`, `/dlq`, and `/healthz` to
-`http://localhost:8080`. Production uses `npm run build` and the Java server.
+Vite runs on 5173 and proxies `/tasks`, `/jobs`, `/dlq`, `/auth`, and
+`/healthz` to `http://localhost:8080`. Production uses `npm run build` and the
+Java server.
 
-### 22.4 Deliberate limits
+### 22.4 Editing and secrets
+
+`PUT /tasks/{id}` remains a full replace, with one extra input:
+`preserve_secrets: true`. If it is true and the incoming headers and body are
+both empty, `TaskService.update` copies the stored request's headers and body
+before saving. The React edit form checks this by default; unchecking the box
+shows empty header/body fields so the user can replace or clear them. Existing
+jobs are never modified.
+
+### 22.5 Deliberate limits
 
 - The JWT is in `localStorage`; this is a local course demo, not a hardened
   multi-user deployment.

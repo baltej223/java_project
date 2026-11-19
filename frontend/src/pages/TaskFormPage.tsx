@@ -1,26 +1,24 @@
-import { useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useState, type FormEvent } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import type { CreateTaskInput, Priority, TaskRequest } from '../types'
 
 type ScheduleMode = 'now' | 'at' | 'cron'
 
-function parsePriority(value: string): Priority {
-  if (value === 'critical' || value === 'high' || value === 'normal' || value === 'low') {
-    return value
+function toLocalInput(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return ''
   }
-  return 'normal'
-}
-
-function parseSchedule(value: string): ScheduleMode {
-  if (value === 'at' || value === 'cron') {
-    return value
-  }
-  return 'now'
+  const pad = (number: number) => String(number).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 export function TaskFormPage() {
   const navigate = useNavigate()
+  const { id } = useParams()
+  const editing = Boolean(id)
+  const [loading, setLoading] = useState(editing)
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
   const [method, setMethod] = useState('POST')
@@ -35,8 +33,49 @@ export function TaskFormPage() {
   const [headersText, setHeadersText] = useState('')
   const [body, setBody] = useState('')
   const [idempotencyKey, setIdempotencyKey] = useState('')
+  const [preserveSecrets, setPreserveSecrets] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (!id) {
+      setLoading(false)
+      return
+    }
+    let cancelled = false
+    async function load(taskId: string) {
+      setLoading(true)
+      setError('')
+      try {
+        const task = await api.getTask(taskId)
+        if (cancelled) return
+        setName(task.name)
+        setUrl(task.request.url)
+        setMethod(task.request.method)
+        setPriority(task.priority)
+        setSchedule(task.cron ? 'cron' : task.at ? 'at' : 'now')
+        setAt(task.at ? toLocalInput(task.at) : '')
+        setCron(task.cron)
+        setTimezone(task.timezone)
+        setTimeoutMs(task.timeout_ms)
+        setMaxAttempts(task.retry.max_attempts)
+        setBackoffMs(task.retry.backoff_ms)
+        setPreserveSecrets(true)
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Could not load task')
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+        }
+      }
+    }
+    void load(id)
+    return () => {
+      cancelled = true
+    }
+  }, [id])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -82,21 +121,34 @@ export function TaskFormPage() {
         }
         input.at = new Date(at).toISOString()
       }
+      if (editing) {
+        input.preserve_secrets = preserveSecrets
+      }
 
-      const task = await api.createTask(input, idempotencyKey)
+      const task = editing && id
+        ? await api.updateTask(id, input)
+        : await api.createTask(input, idempotencyKey)
       navigate(`/tasks/${task.id}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not create task')
+      setError(err instanceof Error ? err.message : 'Could not save task')
     } finally {
       setBusy(false)
     }
   }
 
+  if (loading) {
+    return <p className="text-sm text-slate-500">Loading task…</p>
+  }
+
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">New task</h1>
-        <p className="text-sm text-slate-500">The endpoint is called now, once, or on a cron schedule.</p>
+        <h1 className="text-2xl font-semibold tracking-tight">{editing ? 'Edit task' : 'New task'}</h1>
+        <p className="text-sm text-slate-500">
+          {editing
+            ? 'Existing jobs keep the request they copied when they were planned.'
+            : 'The endpoint is called now, once, or on a cron schedule.'}
+        </p>
       </div>
 
       {error && (
@@ -129,7 +181,10 @@ export function TaskFormPage() {
         <div className="grid gap-4 sm:grid-cols-3">
           <label>
             <span className="label">Priority</span>
-            <select id="priority" name="priority" className="input" value={priority} onChange={(e) => setPriority(parsePriority(e.target.value))}>
+            <select id="priority" name="priority" className="input" value={priority} onChange={(e) => {
+                const value = e.target.value
+                setPriority(value === 'critical' || value === 'high' || value === 'normal' || value === 'low' ? value : 'normal')
+              }}>
               {['critical', 'high', 'normal', 'low'].map((value) => (
                 <option key={value} value={value}>{value}</option>
               ))}
@@ -137,7 +192,10 @@ export function TaskFormPage() {
           </label>
           <label>
             <span className="label">Schedule</span>
-            <select id="schedule" name="schedule" className="input" value={schedule} onChange={(e) => setSchedule(parseSchedule(e.target.value))}>
+            <select id="schedule" name="schedule" className="input" value={schedule} onChange={(e) => {
+                const value = e.target.value
+                setSchedule(value === 'at' || value === 'cron' ? value : 'now')
+              }}>
               <option value="now">Now</option>
               <option value="at">At a time</option>
               <option value="cron">Cron</option>
@@ -151,7 +209,7 @@ export function TaskFormPage() {
 
         {schedule === 'at' && (
           <label>
-            <span className="label">Run at</span>
+            <span className="label">Run at (your local time)</span>
             <input id="at" name="at" className="input" type="datetime-local" value={at} onChange={(e) => setAt(e.target.value)} />
           </label>
         )}
@@ -179,26 +237,48 @@ export function TaskFormPage() {
           </label>
         </div>
 
-        <label>
-          <span className="label">Headers (optional JSON)</span>
-          <textarea id="headers" name="headers" className="input font-mono" rows={3} value={headersText} onChange={(e) => setHeadersText(e.target.value)} placeholder={'{"Authorization": "Bearer …"}'} />
-          <span className="mt-1 block text-xs text-slate-500">Encrypted at rest. Never returned by the API.</span>
-        </label>
+        {editing && (
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              <input
+                type="checkbox"
+                checked={preserveSecrets}
+                onChange={(e) => setPreserveSecrets(e.target.checked)}
+              />
+              Keep the existing encrypted headers and body
+            </label>
+            <p className="mt-1 text-xs text-slate-500">
+              The API never returns stored secrets. Uncheck to replace them.
+            </p>
+          </div>
+        )}
 
-        <label>
-          <span className="label">Body (optional)</span>
-          <textarea id="body" name="body" className="input font-mono" rows={3} value={body} onChange={(e) => setBody(e.target.value)} placeholder='{"hello":"world"}' />
-        </label>
+        {(!editing || !preserveSecrets) && (
+          <>
+            <label>
+              <span className="label">Headers (optional JSON)</span>
+              <textarea id="headers" name="headers" className="input font-mono" rows={3} value={headersText} onChange={(e) => setHeadersText(e.target.value)} placeholder={'{"Authorization": "Bearer …"}'} />
+              <span className="mt-1 block text-xs text-slate-500">Encrypted at rest. Never returned by the API.</span>
+            </label>
 
-        <label>
-          <span className="label">Idempotency key (optional)</span>
-          <input id="idempotency" name="idempotency" className="input" value={idempotencyKey} onChange={(e) => setIdempotencyKey(e.target.value)} placeholder="hello-1" />
-        </label>
+            <label>
+              <span className="label">Body (optional)</span>
+              <textarea id="body" name="body" className="input font-mono" rows={3} value={body} onChange={(e) => setBody(e.target.value)} placeholder='{"hello":"world"}' />
+            </label>
+          </>
+        )}
+
+        {!editing && (
+          <label>
+            <span className="label">Idempotency key (optional)</span>
+            <input id="idempotency" name="idempotency" className="input" value={idempotencyKey} onChange={(e) => setIdempotencyKey(e.target.value)} placeholder="hello-1" />
+          </label>
+        )}
 
         <div className="flex justify-end gap-2">
-          <button type="button" className="btn-secondary" onClick={() => navigate('/tasks')}>Cancel</button>
+          <button type="button" className="btn-secondary" onClick={() => navigate(editing && id ? `/tasks/${id}` : '/tasks')}>Cancel</button>
           <button type="submit" className="btn-primary" disabled={busy}>
-            {busy ? 'Creating…' : 'Create task'}
+            {busy ? 'Saving…' : editing ? 'Save changes' : 'Create task'}
           </button>
         </div>
       </form>

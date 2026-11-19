@@ -86,3 +86,20 @@ CREATE TABLE IF NOT EXISTS job_history (
   KEY idx_history_task (tenant_id, task_id, scheduled_at),
   KEY idx_history_old (archived_at)
 ) ENGINE=InnoDB;
+
+-- Login users. Passwords are PBKDF2-HMAC-SHA256, never plaintext.
+CREATE TABLE IF NOT EXISTS users (
+  tenant_id     VARCHAR(64) NOT NULL,
+  username      VARCHAR(64) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  created_at    DATETIME(3) NOT NULL,
+  PRIMARY KEY (tenant_id, username)
+) ENGINE=InnoDB;
+
+-- Local demo login: tenant "acme", user "admin", password "admin123".
+-- Change this before sharing a deployment.
+INSERT INTO users (tenant_id, username, password_hash, created_at)
+VALUES ('acme', 'admin',
+        'pbkdf2_sha256$120000$AAECAwQFBgcICQoLDA0ODw==$qTnZDrKJXHYwEV6wcbHPg/fmXZ17uxBBfQDmEgaSE3I=',
+        UTC_TIMESTAMP(3))
+ON DUPLICATE KEY UPDATE username = username;

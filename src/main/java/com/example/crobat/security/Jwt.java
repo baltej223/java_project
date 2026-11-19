@@ -1,6 +1,7 @@
-package com.example.crobat.http;
+package com.example.crobat.security;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -13,6 +14,7 @@ import java.util.Map;
 
 /** HS256 sign/verify. No third-party auth library. */
 public final class Jwt {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Base64.Encoder ENCODER = Base64.getUrlEncoder().withoutPadding();
     private static final Base64.Decoder DECODER = Base64.getUrlDecoder();
     private static final String HEADER =
@@ -28,7 +30,7 @@ public final class Jwt {
             claims.put("sub", tenant);
             claims.put("exp", Instant.now().getEpochSecond() + ttlSeconds);
             String payload = ENCODER.encodeToString(
-                    Json.MAPPER.writeValueAsBytes(claims));
+                    MAPPER.writeValueAsBytes(claims));
             String signingInput = HEADER + "." + payload;
             byte[] signature = hmac(secret, signingInput);
             return signingInput + "." + ENCODER.encodeToString(signature);
@@ -49,7 +51,7 @@ public final class Jwt {
                 return null;
             }
 
-            JsonNode header = Json.MAPPER.readTree(DECODER.decode(parts[0]));
+            JsonNode header = MAPPER.readTree(DECODER.decode(parts[0]));
             if (header == null || !"HS256".equals(header.path("alg").asText())) {
                 return null;
             }
@@ -60,7 +62,7 @@ public final class Jwt {
                 return null;
             }
 
-            JsonNode claims = Json.MAPPER.readTree(DECODER.decode(parts[1]));
+            JsonNode claims = MAPPER.readTree(DECODER.decode(parts[1]));
             if (claims == null) {
                 return null;
             }

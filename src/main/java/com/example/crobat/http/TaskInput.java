@@ -17,6 +17,7 @@ public class TaskInput {
     private RequestSpec request = new RequestSpec();
     private int timeoutMs;
     private RetryPolicy retry = new RetryPolicy();
+    private boolean preserveSecrets;
 
     public Task toTask() {
         Task task = new Task();
@@ -89,6 +90,14 @@ public class TaskInput {
 
     public RetryPolicy getRetry() {
         return retry;
+    }
+
+    public boolean isPreserveSecrets() {
+        return preserveSecrets;
+    }
+
+    public void setPreserveSecrets(boolean preserveSecrets) {
+        this.preserveSecrets = preserveSecrets;
     }
 
     public void setRetry(RetryPolicy retry) {

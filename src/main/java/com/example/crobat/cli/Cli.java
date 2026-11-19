@@ -2,7 +2,7 @@ package com.example.crobat.cli;
 
 import com.example.crobat.config.Config;
 import com.example.crobat.http.Json;
-import com.example.crobat.http.Jwt;
+import com.example.crobat.security.Jwt;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.net.URI;

@@ -9,6 +9,7 @@ export default defineConfig({
       '/tasks': 'http://localhost:8080',
       '/jobs': 'http://localhost:8080',
       '/dlq': 'http://localhost:8080',
+      '/auth': 'http://localhost:8080',
       '/healthz': 'http://localhost:8080',
     },
   },

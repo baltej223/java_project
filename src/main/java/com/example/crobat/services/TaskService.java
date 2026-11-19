@@ -56,9 +56,16 @@ public class TaskService {
         return tasks.list(tenantId, 500);
     }
 
-    public Task update(String tenantId, String id, Task input) {
+    public Task update(String tenantId, String id, Task input, boolean preserveSecrets) {
         Task task = tasks.get(tenantId, id);
         input.normalize();
+
+        if (preserveSecrets
+                && input.getRequest().getHeaders().isEmpty()
+                && input.getRequest().getBody().isEmpty()) {
+            input.getRequest().setHeaders(task.getRequest().getHeaders());
+            input.getRequest().setBody(task.getRequest().getBody());
+        }
 
         boolean scheduleChanged = !input.getCron().equals(task.getCron())
                 || !input.getTimezone().equals(task.getTimezone())

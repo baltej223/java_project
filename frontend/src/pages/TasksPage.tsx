@@ -117,6 +117,7 @@ export function TasksPage() {
                     <td className="table-cell text-slate-500">{formatDate(task.next_run_at)}</td>
                     <td className="table-cell">
                       <div className="flex gap-2">
+                        <Link className="btn-secondary" to={`/tasks/${task.id}/edit`}>Edit</Link>
                         {task.status === 'active' ? (
                           <button className="btn-secondary" disabled={busy === task.id} onClick={() => void pause(task)}>
                             Pause

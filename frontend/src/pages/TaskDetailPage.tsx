@@ -96,6 +96,9 @@ export function TaskDetailPage() {
           <p className="text-sm text-slate-500">{id}</p>
         </div>
         <div className="flex gap-2">
+          {task && (
+            <Link className="btn-secondary" to={`/tasks/${task.id}/edit`}>Edit</Link>
+          )}
           <button className="btn-secondary" disabled={busy || !task} onClick={() => void toggle()}>
             {task?.status === 'active' ? 'Pause' : 'Resume'}
           </button>

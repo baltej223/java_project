@@ -13,8 +13,8 @@ This file tells any coding agent (or teammate) how to work in this repository.
 ## Current phase
 
 The v1 implementation is complete: domain, MySQL stores, six service roles,
-REST APIs, CLI, React console, Docker stack, and tests. Continue with small,
-tested changes.
+REST APIs, CLI, React console with login, task editing, Docker stack, and
+tests. Continue with small, tested changes.
 
 ## Product in one paragraph
 
@@ -54,6 +54,7 @@ table; there is no Kafka, RabbitMQ, or Redis.
 | Build | Maven, one module |
 | Web | `com.sun.net.httpserver.HttpServer` from the JDK |
 | Console | React 18 + TypeScript + Vite + Tailwind CSS + React Router |
+| Login | `users` table with PBKDF2-HMAC-SHA256; `POST /auth/login` issues the HS256 JWT |
 | JSON | Jackson, **snake_case** property names |
 | Database | Plain JDBC + MySQL Connector/J |
 | Cron parsing | `cron-utils` |
@@ -88,6 +89,9 @@ docker compose logs -f app echo
 The console is served by `all` mode on port 8080. Local jar runs need
 `WEB_ROOT=frontend/dist` if the frontend was built outside Docker.
 
+Demo login: tenant `acme`, username `admin`, password `admin123`.
+The seed lives in `deploy/mysql/schema.sql`.
+
 The app also runs one role at a time: `task-api`, `job-api`, `scheduler`,
 `executor`, `reconciler`, `archiver`, `echo`.
 
@@ -112,15 +116,16 @@ src/main/java/com/example/crobat/
     Main.java
     config/Config.java
     domain/        enums, Task, Job, Result, cron, backoff, fair pick
-    db/            Database, SecretsCipher, TaskStore, JobStore, HistoryStore
-    services/      TaskService, JobService, four background loops
-    http/          Json, Jwt, Router, TaskApi, JobApi, EchoApi, WebUi
+    db/            Database, SecretsCipher, TaskStore, JobStore, HistoryStore, UserStore
+    services/      TaskService, JobService, AuthService, PasswordHasher, four loops
+    http/          Json, Router, TaskApi, JobApi, AuthApi, EchoApi, WebUi
+    security/      Jwt (HS256 sign/verify)
     call/          HttpCaller, SsrfGuard, Cidr
     cli/           Cli
 src/test/java/com/example/crobat/...
 frontend/          React + TypeScript + Tailwind + React Router
-  src/pages/       overview, tasks, create, detail, DLQ
-  src/components/  layout, token bar, badges
+  src/pages/       login, overview, tasks, create/edit, detail, DLQ
+  src/components/  layout, badges
   src/api.ts       fetch wrapper with the bearer token
 ```
 
@@ -144,8 +149,11 @@ frontend/          React + TypeScript + Tailwind + React Router
 - Frontend: plain function components, no state library, no component library.
   Use Tailwind utility classes and `fetch`. Keep the console same-origin on
   port 8080; do not add CORS.
-- Do not put secrets in frontend code, logs, or URLs. The JWT lives in
-  `localStorage` only because this is a local course demo.
+- Login: passwords are PBKDF2 hashes, never plaintext in the database or logs.
+  The JWT lives in `localStorage` only because this is a local course demo.
+  Do not log passwords or tokens. Blank the demo password from a shared deploy.
+- Task edits must preserve existing encrypted headers/body unless the client
+  explicitly unchecks the preserve option. Existing jobs are never changed.
 
 ## Database invariants
 
@@ -180,4 +188,6 @@ A change is done only when:
 - a failed HTTP call leaves the job in `pending` or `dead`, never lost;
 - `mvn test` passes;
 - `cd frontend && npm run build` passes when the console changed;
+- login works with the seeded user, and a wrong password returns 401;
+- editing a task keeps its encrypted headers/body by default;
 - `impl.doc` is updated if behavior or structure changed.

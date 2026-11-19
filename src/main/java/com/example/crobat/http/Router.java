@@ -2,6 +2,8 @@ package com.example.crobat.http;
 
 import com.example.crobat.domain.DomainException;
 import com.example.crobat.domain.NotFoundException;
+import com.example.crobat.domain.UnauthorizedException;
+import com.example.crobat.security.Jwt;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -32,12 +34,15 @@ public class Router implements HttpHandler {
         final String[] pattern;
         final int status;
         final ApiHandler handler;
+        final boolean publicRoute;
 
-        Route(String method, String path, int status, ApiHandler handler) {
+        Route(String method, String path, int status, ApiHandler handler,
+              boolean publicRoute) {
             this.method = method;
             this.pattern = split(path);
             this.status = status;
             this.handler = handler;
+            this.publicRoute = publicRoute;
         }
     }
 
@@ -49,7 +54,12 @@ public class Router implements HttpHandler {
     }
 
     public Router add(String method, String path, int status, ApiHandler handler) {
-        routes.add(new Route(method, path, status, handler));
+        routes.add(new Route(method, path, status, handler, false));
+        return this;
+    }
+
+    public Router addPublic(String method, String path, int status, ApiHandler handler) {
+        routes.add(new Route(method, path, status, handler, true));
         return this;
     }
 
@@ -61,14 +71,6 @@ public class Router implements HttpHandler {
                     && "/healthz".equals(path)) {
                 writeBytes(exchange, 200, "ok".getBytes(StandardCharsets.UTF_8),
                         "text/plain");
-                return;
-            }
-
-            String tenant = Jwt.tenantFrom(
-                    exchange.getRequestHeaders().getFirst("Authorization"), jwtSecret);
-            if (tenant == null) {
-                writeJson(exchange, 401,
-                        Map.of("error", "invalid or missing bearer token"));
                 return;
             }
 
@@ -89,6 +91,17 @@ public class Router implements HttpHandler {
                 return;
             }
 
+            String tenant = "";
+            if (!route.publicRoute) {
+                tenant = Jwt.tenantFrom(
+                        exchange.getRequestHeaders().getFirst("Authorization"), jwtSecret);
+                if (tenant == null) {
+                    writeJson(exchange, 401,
+                            Map.of("error", "invalid or missing bearer token"));
+                    return;
+                }
+            }
+
             byte[] body = readBody(exchange);
             Object result = route.handler.handle(tenant, params, body, exchange);
             if (result == null) {
@@ -98,6 +111,8 @@ public class Router implements HttpHandler {
             }
         } catch (DomainException ex) {
             writeJson(exchange, 400, Map.of("error", ex.getMessage()));
+        } catch (UnauthorizedException ex) {
+            writeJson(exchange, 401, Map.of("error", ex.getMessage()));
         } catch (NotFoundException ex) {
             writeJson(exchange, 404, Map.of("error", ex.getMessage()));
         } catch (JsonProcessingException ex) {

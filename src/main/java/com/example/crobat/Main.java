@@ -8,12 +8,15 @@ import com.example.crobat.db.HistoryStore;
 import com.example.crobat.db.JobStore;
 import com.example.crobat.db.SecretsCipher;
 import com.example.crobat.db.TaskStore;
+import com.example.crobat.db.UserStore;
+import com.example.crobat.http.AuthApi;
 import com.example.crobat.http.EchoApi;
 import com.example.crobat.http.JobApi;
 import com.example.crobat.http.Router;
 import com.example.crobat.http.TaskApi;
 import com.example.crobat.http.WebUi;
 import com.example.crobat.services.ArchiverLoop;
+import com.example.crobat.services.AuthService;
 import com.example.crobat.services.ExecutorLoop;
 import com.example.crobat.services.JobService;
 import com.example.crobat.services.ReconcilerLoop;
@@ -183,6 +186,9 @@ public final class Main {
         TaskStore tasks = new TaskStore(database, cipher);
         JobStore jobs = new JobStore(database, cipher);
         HistoryStore history = new HistoryStore(database);
+        UserStore users = new UserStore(database);
+        AuthService authService = new AuthService(
+                users, jwt, config.getAuthTokenTtlSeconds());
         TaskService taskService = new TaskService(tasks);
         JobService jobService = new JobService(jobs, history);
         HttpCaller caller = new HttpCaller(config.getExecutorAllowCidrs());
@@ -192,6 +198,7 @@ public final class Main {
         // The dashboard and its API share one origin on the task-api port.
         Router combined = TaskApi.router(taskService, jwt);
         JobApi.register(combined, jobService);
+        AuthApi.register(combined, authService);
         HttpServer taskServer = startServer(config.getTaskApiPort(),
                 new WebUi(combined, Path.of(config.getWebRoot())), taskPool);
         HttpServer jobServer = startServer(config.getJobApiPort(),

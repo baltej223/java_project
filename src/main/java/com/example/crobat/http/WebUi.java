@@ -71,7 +71,8 @@ public class WebUi implements HttpHandler {
         return path.equals("/healthz")
                 || path.equals("/tasks") || path.startsWith("/tasks/")
                 || path.equals("/jobs") || path.startsWith("/jobs/")
-                || path.equals("/dlq") || path.startsWith("/dlq/");
+                || path.equals("/dlq") || path.startsWith("/dlq/")
+                || path.equals("/auth") || path.startsWith("/auth/");
     }
 
     private void serve(HttpExchange exchange, String path) throws IOException {

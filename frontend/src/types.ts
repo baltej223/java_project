@@ -56,6 +56,7 @@ export interface Job {
 
 export interface CreateTaskInput {
   name: string
+  preserve_secrets?: boolean
   cron?: string
   at?: string
   timezone: string
@@ -67,4 +68,11 @@ export interface CreateTaskInput {
 
 export interface ApiError {
   error: string
+}
+
+export interface LoginResponse {
+  token: string
+  tenant_id: string
+  username: string
+  expires_at: string
 }

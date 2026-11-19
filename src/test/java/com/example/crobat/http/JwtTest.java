@@ -1,5 +1,7 @@
 package com.example.crobat.http;
 
+import com.example.crobat.security.Jwt;
+
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;

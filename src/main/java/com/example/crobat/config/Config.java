@@ -21,6 +21,7 @@ public class Config {
     private final String workerId;
     private final String executorAllowCidrs;
     private final String webRoot;
+    private final long authTokenTtlSeconds;
     private final long reconcilerIntervalMs;
     private final int reconcilerBatch;
     private final long archiverIntervalMs;
@@ -49,6 +50,7 @@ public class Config {
         workerId = env("WORKER_ID", defaultWorkerId());
         executorAllowCidrs = env("EXECUTOR_ALLOW_CIDRS", "");
         webRoot = env("WEB_ROOT", "frontend/dist");
+        authTokenTtlSeconds = longEnv("AUTH_TOKEN_TTL_SECONDS", 86_400);
         reconcilerIntervalMs = longEnv("RECONCILER_INTERVAL_MS", 5_000);
         reconcilerBatch = intEnv("RECONCILER_BATCH", 1000);
         archiverIntervalMs = longEnv("ARCHIVER_INTERVAL_MS", 10_000);
@@ -174,6 +176,10 @@ public class Config {
 
     public String getWebRoot() {
         return webRoot;
+    }
+
+    public long getAuthTokenTtlSeconds() {
+        return authTokenTtlSeconds;
     }
 
     public long getReconcilerIntervalMs() {

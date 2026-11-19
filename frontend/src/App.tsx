@@ -1,10 +1,17 @@
-import { Link, Route, Routes } from 'react-router-dom'
+import type { ReactNode } from 'react'
+import { Link, Navigate, Route, Routes } from 'react-router-dom'
+import { getToken } from './api'
 import { Layout } from './components/Layout'
+import { LoginPage } from './pages/LoginPage'
 import { HomePage } from './pages/HomePage'
 import { TasksPage } from './pages/TasksPage'
 import { TaskFormPage } from './pages/TaskFormPage'
 import { TaskDetailPage } from './pages/TaskDetailPage'
 import { DlqPage } from './pages/DlqPage'
+
+function RequireAuth({ children }: { children: ReactNode }) {
+  return getToken() ? <>{children}</> : <Navigate to="/login" replace />
+}
 
 function NotFound() {
   return (
@@ -20,10 +27,18 @@ function NotFound() {
 export default function App() {
   return (
     <Routes>
-      <Route element={<Layout />}>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        element={
+          <RequireAuth>
+            <Layout />
+          </RequireAuth>
+        }
+      >
         <Route index element={<HomePage />} />
         <Route path="tasks" element={<TasksPage />} />
         <Route path="tasks/new" element={<TaskFormPage />} />
+        <Route path="tasks/:id/edit" element={<TaskFormPage />} />
         <Route path="tasks/:id" element={<TaskDetailPage />} />
         <Route path="dlq" element={<DlqPage />} />
         <Route path="*" element={<NotFound />} />

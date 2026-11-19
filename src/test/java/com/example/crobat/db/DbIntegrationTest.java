@@ -100,6 +100,17 @@ class DbIntegrationTest {
         Task repeated = taskService.create(tenant, "idem-" + tenant, secondInput);
         assertEquals(created.getId(), repeated.getId());
 
+        Task edit = new Task();
+        edit.setName("integration-edited");
+        edit.setPriority(Priority.HIGH);
+        edit.setRequest(new RequestSpec("POST", "http://8.8.8.8/hook", Map.of(), ""));
+        edit.setTimeoutMs(1000);
+        edit.setRetry(new RetryPolicy(2, 500));
+        Task updated = taskService.update(tenant, created.getId(), edit, true);
+        assertEquals("integration-edited", updated.getName());
+        assertEquals("Bearer secret",
+                taskService.get(tenant, created.getId()).getRequest().getHeaders().get("Authorization"));
+
         List<Job> planned = jobs.listForTask(tenant, created.getId(), 10);
         assertEquals(1, planned.size());
         Job plannedJob = planned.get(0);

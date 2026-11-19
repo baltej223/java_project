@@ -23,7 +23,8 @@ public final class TaskApi {
 
         router.add("PUT", "/tasks/{id}", 200, (tenant, params, body, exchange) -> {
             TaskInput input = Json.MAPPER.readValue(body, TaskInput.class);
-            return service.update(tenant, params.get("id"), input.toTask());
+            return service.update(tenant, params.get("id"),
+                    input.toTask(), input.isPreserveSecrets());
         });
 
         router.add("POST", "/tasks/{id}/pause", 200,
