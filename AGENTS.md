@@ -173,8 +173,7 @@ frontend/          React + TypeScript + Tailwind + React Router
 Remote: `git@github.com:baltej223/java_project.git`
 
 - Use plain `git`; do not use `gh`.
-- Commit with `timegit`, not `git commit`, when a backdated history is
-  requested. Stage with `git add`, then `timegit new -m "<message>" "<time>"`.
+- Commit in real time. Never backdate a commit and do not use `timegit`.
 - Keep `crobat/` ignored; it is the reference implementation, not part of the
   Java deliverable.
 
